@@ -7,12 +7,16 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
+
 from config import BOT_TOKEN as TOKEN
 # Подключаем нашего созданного охранника из папки middlewares
 from middlewares.db_middleware import DbSessionMiddleware  
 
 # ИМПОРТИРУЕМ НАШ РОУТЕР (Вместо старого комментария)
 from handlers.common import router as common_router  
+
+# Добавили импорт движка и базы моделей
+from database import engine, Base 
 
 async def main():
     # Настраиваем логирование в консоль
@@ -22,6 +26,14 @@ async def main():
         stream=sys.stdout
     )
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    # 👇 ДОБАВЛЯЕМ ЭТИ СТРОЧКИ ДЛЯ АВТОМАТИЧЕСКОГО СОЗДАНИЯ ТАБЛИЦ 👇
+    print("⏳ Проверяем и создаем таблицы в базе данных...")
+    async with engine.begin() as conn:
+        # Эта команда посмотрит на все модели из models.py и создаст таблицы, если их нет
+        await conn.run_sync(Base.metadata.create_all)
+    print("✅ Все таблицы базы данных проверены/созданы!")
+
 
     # Инициализируем бот с поддержкой HTML-разметки в сообщениях
     bot = Bot(
