@@ -11,3 +11,8 @@ __pycache__/
 # Виртуальное окружение
 venv/
 .venv/
+
+# Документы (PDF и Word)
+*.pdf
+*.docx
+*.doc
