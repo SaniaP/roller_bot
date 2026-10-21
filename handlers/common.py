@@ -148,3 +148,62 @@ async def process_reg_birth_date(message: Message, state: FSMContext, session: A
         "Теперь ты можешь записываться на тренировки и вносить свои трюки!",
         reply_markup=get_skater_main_menu()
     )
+
+
+@router.message(Command("set_student"))
+async def set_role_student(message: Message, session: AsyncSession):
+    """Секретная команда: принудительно делает тебя УЧЕНИКОМ в базе данных"""
+    # 1. Ищем твою запись в базе
+    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+    user = result.scalar_one_or_none()
+    
+    # 2. Если тебя вообще нет в базе (например, очистил БД), создаем профиль
+    if not user:
+        user = User(
+            telegram_id=message.from_user.id,
+            full_name=message.from_user.full_name,
+            role="student",
+            is_approved=True  # Сразу одобряем себя
+        )
+        session.add(user)
+    else:
+        # Если ты был, просто меняем роль и одобряем
+        user.role = "student"
+        user.is_approved = True
+        
+    await session.commit()
+    
+    await message.answer(
+        "🔄 **Роль успешно изменена на: СПОРТСМЕН (Ученик)**\n"
+        "Теперь тебе доступно игровое RPG-меню и внесение трюков!",
+        reply_markup=get_skater_main_menu(),
+        parse_mode="Markdown"
+    )
+
+@router.message(Command("set_coach"))
+async def set_role_coach(message: Message, session: AsyncSession):
+    """Секретная команда: принудительно делает тебя ТРЕНЕРОМ в базе данных"""
+    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        user = User(
+            telegram_id=message.from_user.id,
+            full_name=message.from_user.full_name,
+            role="coach",
+            is_approved=True
+        )
+        session.add(user)
+    else:
+        user.role = "coach"
+        user.is_approved = True
+        
+    await session.commit()
+    
+    # Сюда можно подставить твою клавиатуру тренера, если она есть
+    await message.answer(
+        "🔄 **Роль успешно изменена на: ТРЕНЕР**\n"
+        "Теперь ты можешь управлять тренировками и подтверждать трюки!",
+        # reply_markup=get_coach_main_menu(), # Раскомментируй, если кнопка готова
+        parse_mode="Markdown"
+    )

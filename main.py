@@ -7,13 +7,14 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-
 from config import BOT_TOKEN as TOKEN
 # Подключаем нашего созданного охранника из папки middlewares
 from middlewares.db_middleware import DbSessionMiddleware  
 
-# ИМПОРТИРУЕМ НАШ РОУТЕР (Вместо старого комментария)
+# ИМПОРТИРУЕМ НАШ РОУТЕР и роутер тренера
 from handlers.common import router as common_router  
+from handlers.coach import router as coach_router
+from handlers.student import student_router
 
 # Добавили импорт движка и базы моделей
 from database import engine, Base 
@@ -47,10 +48,14 @@ async def main():
 
     # ВАЖНО: Нанимаем охранника! Теперь база данных автоматически едет в хэндлеры
     dp.message.middleware(DbSessionMiddleware())
+    #для инлайн-кнопок
+    dp.callback_query.middleware(DbSessionMiddleware())
 
     # РЕГИСТРИРУЕМ РОУТЕР (Этой строчкой мы говорим диспетчеру слушать команду /start)
     dp.include_router(common_router)
-
+    #тоже для тренера и спротсмена
+    dp.include_router(coach_router)
+    dp.include_router(student_router)
     # Сообщение в консоль о старте
     print("🚀 Бот роллер-школы успешно запущен и готов к работе!")
 

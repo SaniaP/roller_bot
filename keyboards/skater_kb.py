@@ -6,7 +6,7 @@ def get_skater_main_menu() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(KeyboardButton(text="🎯 Внести выполненный трюк"))
     builder.row(
-        KeyboardButton(text="📊 Мой RPG-Профиль"),
+        KeyboardButton(text="📊 Мой Hero-Профиль"),
         KeyboardButton(text="🛹 Мои трюки")
     )
     builder.row(KeyboardButton(text="📜 История тренировок"))
