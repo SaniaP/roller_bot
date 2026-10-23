@@ -4,7 +4,7 @@ from models import LevelExperience, XpPenalty, Trick
 
 async def seed_database():
     print("⏳ Начало заполнения справочников базы данных...")
-    
+        #async_session
     async with async_session() as session:
         # 1. ГЕНЕРАЦИЯ 80 УРОВНЕЙ ОПЫТА, ЛИМИТОВ И РАЗНООБРАЗИЯ
         print("→ Генерируем 80 уровней опыта, лимиты подходов и правила разнообразия...")

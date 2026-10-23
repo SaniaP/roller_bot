@@ -7,7 +7,7 @@ from database import Base
 class User(Base):
     """Таблица пользователей (Тренеры и Спортсмены)"""
     __tablename__ = "users"
-
+    
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, nullable=True)
     role: Mapped[str] = mapped_column(String(20), default="student")  # 'coach' или 'student'
@@ -22,7 +22,7 @@ class User(Base):
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     birth_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
-    @property
+    @property      #встроенный дек-р, позволяющий пользоваться .is_coach, не держа в БД роль пользователя
     def is_coach(self) -> bool:
         """Удобная проверка роли без хранения дублирующего флага в базе"""
         return self.role == "coach"
