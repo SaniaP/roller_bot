@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from models import User, Workout, WorkoutRegistration, TrickLog, Trick
+#сделать красиво.! иначе зачем нам инит states файл ?
 from states.coach_states import CoachRegistrationStates, WorkoutCreationStates
 from keyboards.coach_kb import get_coach_main_menu, get_cancel_keyboard
 from keyboards import get_skater_main_menu

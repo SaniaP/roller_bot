@@ -8,18 +8,18 @@ from sqlalchemy import select
 from models import User
 from config import CHIEF_COACH_ID
 from states import SkaterRegistrationStates
-# Импортируем клавиатуры (функцию get_role_selection_kb добавим на следующем шаге)
-from keyboards.common_kb import get_role_selection_kb 
-from keyboards import get_coach_main_menu, get_skater_main_menu
+
+# Импортируем клавиатуры 
+from keyboards import get_coach_main_menu, get_skater_main_menu, get_role_selection_kb
 
 router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     """Хэндлер команды /start. Проверяет авторизацию или предлагает выбрать роль."""
-    await state.clear()
+    await state.clear()      #сброс FSM для текущего юзера
     tg_id = message.from_user.id
-
+    
     # Проверяем, есть ли пользователь в базе данных
     query = select(User).where(User.telegram_id == tg_id)
     result = await session.execute(query)
@@ -33,7 +33,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             "Для начала выбери свою <b>роль в системе</b>:",
             reply_markup=get_role_selection_kb()
         )
-        return
+        return # обязательно нужен, что бы функция не пошла дальше
 
     # 2. Если вошел Тренер
     if user.role == "coach":
@@ -52,6 +52,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             reply_markup=get_skater_main_menu()
         )
 
+#после выполнения /start, запустится одна из трех функций из трех функций,
+# которые в любом случае приведут нас к выбору роли. 
 
 @router.callback_query(F.data == "select_role_coach")
 async def process_select_coach(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -73,10 +75,11 @@ async def process_select_coach(callback: CallbackQuery, state: FSMContext, sessi
         telegram_id=tg_id,
         full_name=full_name,
         role="coach",
-        is_approved=True
+        is_approved=True            #нужно ли тут?
     )
     session.add(new_coach)
-    # commit выполнится автоматически благодаря нашей Middleware!
+
+    # commit выполнится автоматически благодаря нашей Middleware! session туда попадает и проверяется
     
     await callback.message.edit_text(
         f"👑 Авторизация успешна!\nСоздан профиль Тренера: <b>{full_name}</b>.\n"
