@@ -11,9 +11,3 @@ async_session = async_sessionmaker(bind=engine, expire_on_commit=False, class_=A
 # Базовый класс, от которого у нас будут наследоваться все модели (таблицы)
 class Base(DeclarativeBase):
     pass
-
-# Генератор сессий БД. Обеспечивает изолированную сессию для каждого запроса/пользователя.
-# Именно здесь используется асинхронный контекст, чтобы не блокировать бота при работе с БД.
-async def get_db():
-    async with async_session() as session:
-        yield session               
