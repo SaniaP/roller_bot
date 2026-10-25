@@ -11,12 +11,20 @@ from sqlalchemy import select, delete
 from models import User, Workout, WorkoutRegistration, TrickLog, Trick
 from states.coach_states import CoachRegistrationStates, WorkoutCreationStates
 from keyboards.coach_kb import (
-    get_coach_main_menu, get_cancel_keyboard,
+    get_coach_main_menu, get_coach_main_menu_sync, get_cancel_keyboard,
     get_active_workout_kb, get_skater_workout_card_kb,
     get_categories_kb, get_tricks_by_cat_kb, get_track_coeff_kb,
-    WorkoutAction, TrickAction
+    WorkoutAction, TrickAction, HandbookAction
 )
 from calculator import calculate_single_trick, calculate_current_workout_totals, check_level_up
+
+
+async def get_coach_menu_for(session: AsyncSession):
+    """Возвращает главное меню тренера с учётом наличия активной тренировки"""
+    active_w = (await session.execute(
+        select(Workout).where(Workout.status == "active")
+    )).scalar_one_or_none()
+    return get_coach_main_menu_sync(has_active_workout=active_w is not None)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -26,18 +34,18 @@ router = Router()
 # ==========================================
 
 @router.message(F.text == "❌ Отмена")
-async def cmd_cancel(message: Message, state: FSMContext):
+async def cmd_cancel(message: Message, state: FSMContext, session: AsyncSession):
     await state.clear()
-    await message.answer("❌ Действие отменено. Возвращаю вас в главное меню.", reply_markup=get_coach_main_menu())
+    await message.answer("❌ Действие отменено. Возвращаю вас в главное меню.", reply_markup=await get_coach_menu_for(session))
 
 # Перехватываем старый роутинг из меню выбора ролей (если он прилетает строкой)
 @router.callback_query(F.data == "select_role_coach")
-async def process_select_role_coach(callback: CallbackQuery, state: FSMContext):
+async def process_select_role_coach(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
     await callback.message.edit_text(
         text="🔑 Вы вошли в панель тренера. Используйте нижнее меню бота для управления.",
         reply_markup=None
     )
-    await callback.message.answer("Главное меню тренера загружено:", reply_markup=get_coach_main_menu())
+    await callback.message.answer("Главное меню тренера загружено:", reply_markup=await get_coach_menu_for(session))
 
 # ==========================================
 # 1. РУЧНОЕ ДОБАВЛЕНИЕ УЧЕНИКА ТРЕНЕРОМ (ОСТАВЛЯЕМ КАК ЕСТЬ)
@@ -80,22 +88,31 @@ async def coach_add_student_finish(message: Message, state: FSMContext, session:
     session.add(new_student)
     await session.commit()
     await state.clear()
-    await message.answer(f"🎉 Профиль ученика успешно создан!", reply_markup=get_coach_main_menu())
+    await message.answer(f"🎉 Профиль ученика успешно создан!", reply_markup=await get_coach_menu_for(session))
 
 # ==========================================
 # 2. НОВАЯ ЛОГИКА ТРЕНИРОВКИ (ОБНОВЛЕННЫЙ ПУНКТ 1.1)
 # ==========================================
 
-@router.message(F.text == "🏋️ Начать тренировку")
+@router.message(F.text.in_({"🏋️ Начать тренировку", "🏋️ Продолжить тренировку"}))
 async def coach_start_workout(message: Message, session: AsyncSession):
-    """Инициализация тренировки. Проверяем активные, если нет — создаем"""
+    """Открытие/продолжение тренировки. Если активная есть — открываем её меню"""
     query = select(Workout).where(Workout.status == "active")
     active_workout = (await session.execute(query)).scalar_one_or_none()
 
     if active_workout:
+        # Продолжаем: собираем текущий список спортсменов на занятии
+        reg_stmt = select(WorkoutRegistration).where(WorkoutRegistration.workout_id == active_workout.id)
+        regs = (await session.execute(reg_stmt)).scalars().all()
+
+        current_students = []
+        for r in regs:
+            st = await session.get(User, r.student_id)
+            if st: current_students.append(st)
+
         await message.answer(
-            "⚠️ У вас уже есть активная тренировка! Управляйте ей ниже:",
-            reply_markup=get_active_workout_kb(active_workout.id, [])
+            "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nСписок спортсменов на занятии:",
+            reply_markup=get_active_workout_kb(active_workout.id, current_students)
         )
         return
 
@@ -107,6 +124,97 @@ async def coach_start_workout(message: Message, session: AsyncSession):
         "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nДобавьте спортсменов из БД, чтобы начать фиксацию результатов.",
         reply_markup=get_active_workout_kb(new_workout.id, [])
     )
+
+# ==========================================
+# 2. СПРАВОЧНИК ТРЮКОВ (ТОЛЬКО ПРОСМОТР)
+# ==========================================
+
+@router.message(F.text == "📚 Справочник трюков")
+async def show_tricks_handbook(message: Message, session: AsyncSession):
+    """Просмотр справочника трюков: выбор категории"""
+    cats_stmt = select(Trick.category).distinct()
+    categories = (await session.execute(cats_stmt)).scalars().all()
+
+    if not categories:
+        await message.answer("🤖 Справочник трюков пока пуст. Наполните базу данных.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    for cat in categories:
+        builder.button(
+            text=str(cat).capitalize(),
+            callback_data=HandbookAction(action="hb_cat", category=str(cat))
+        )
+    builder.adjust(2)
+    await message.answer("📚 Справочник трюков. Выберите категорию:", reply_markup=builder.as_markup())
+
+
+@router.callback_query(HandbookAction.filter(F.action == "hb_cat"))
+async def show_handbook_tricks(callback: CallbackQuery, callback_data: HandbookAction, session: AsyncSession):
+    """Список трюков выбранной категории с их параметрами"""
+    tricks_stmt = select(Trick).where(Trick.category == callback_data.category)
+    tricks = (await session.execute(tricks_stmt)).scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    for trick in tricks:
+        builder.button(
+            text=f"{trick.name} (Tier {trick.trick_tier})",
+            callback_data=HandbookAction(action="hb_trick", category=callback_data.category, trick_id=trick.id)
+        )
+    builder.button(text="⬅️ К категориям", callback_data=HandbookAction(action="hb_back"))
+    builder.adjust(1)
+
+    await callback.message.edit_text(
+        f"📚 Категория: {callback_data.category.upper()}. Выберите трюк:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(HandbookAction.filter(F.action == "hb_trick"))
+async def show_handbook_trick_details(callback: CallbackQuery, callback_data: HandbookAction, session: AsyncSession):
+    """Карточка трюка с коэффициентами и наградами"""
+    trick = await session.get(Trick, callback_data.trick_id)
+    if not trick:
+        await callback.answer("Трюк не найден", show_alert=True)
+        return
+
+    text = (
+        f"🎯 **{trick.name}**\n\n"
+        f"📦 Категория: {trick.category}\n"
+        f"🏅 Тир (сложность): {trick.trick_tier}\n"
+        f"📐 База: {trick.base_quantity} конусов\n\n"
+        f"📏 Коэфф. дорожки 50 см: {trick.coeff_50}\n"
+        f"📏 Коэфф. дорожки 80 см: {trick.coeff_80}\n"
+        f"📏 Коэфф. дорожки 120 см: {trick.coeff_120}\n\n"
+        f"⭐ Базовые баллы: {trick.base_tech_points}\n"
+        f"✨ Базовый опыт: {trick.base_xp} XP\n"
+        f"➕ Бонус за конус свыше базы: +{int(trick.extra_bonus_pct * 100)}%"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="⬅️ К списку трюков",
+        callback_data=HandbookAction(action="hb_cat", category=callback_data.category)
+    )
+    builder.adjust(1)
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+
+@router.callback_query(HandbookAction.filter(F.action == "hb_back"))
+async def show_handbook_back_to_categories(callback: CallbackQuery, session: AsyncSession):
+    cats_stmt = select(Trick.category).distinct()
+    categories = (await session.execute(cats_stmt)).scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    for cat in categories:
+        builder.button(
+            text=str(cat).capitalize(),
+            callback_data=HandbookAction(action="hb_cat", category=str(cat))
+        )
+    builder.adjust(2)
+    await callback.message.edit_text("📚 Справочник трюков. Выберите категорию:", reply_markup=builder.as_markup())
+
 
 @router.callback_query(WorkoutAction.filter(F.action == "add_skater_to_w"))
 async def add_skater_from_db_list(callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession):
@@ -229,19 +337,22 @@ trick_id=callback_data.trick_id
     await callback.message.edit_text("Выберите размер дорожки (конусов):", reply_markup=get_track_coeff_kb())
     await state.set_state(WorkoutCreationStates.waiting_for_track_coeff)
 
-@router.callback_query(
-    WorkoutCreationStates.waiting_for_track_coeff, F.data.startswith("cone_")
-)
+@router.callback_query(WorkoutCreationStates.waiting_for_track_coeff, F.data.startswith("cone_"))
 async def process_fsm_track_coeff(callback: CallbackQuery, state: FSMContext):
-    # Разделяем callback_data и забираем размер конуса ("50", "80", "120")
-    cone_size = callback.data.split("_")[1]
+    cone_size = callback.data.split("_")[1] # Извлекаем "50", "80" или "120"
     await state.update_data(cone_line=cone_size)
-
-    # Убираем инлайн-кнопки, запрашиваем ввод текстом через Reply-отмену
+    
     await callback.message.delete()
     await callback.message.answer(
-        "🔢 Введите количество выполненных конусов/повторений (числом):",
+        "🔢 **Введите результаты выполнения**\n\n"
+        "Отправьте количество конусов. Если нужно учесть чистоту/качество исполнения трюка, "
+        "укажите через запятую поправку в процентах.\n\n"
+        "**Примеры ввода:**\n"
+        "• `9` [хорошее исполнение]\n"
+        "• `8,-10` — штраф 10% за помарки и недачеты в технике\n"
+        "• `11,20` — 20% бонус за идеальное исполнение трюка",
         reply_markup=get_cancel_keyboard(),
+        parse_mode="Markdown"
     )
     await state.set_state(WorkoutCreationStates.waiting_for_quantity)
 
@@ -290,7 +401,7 @@ async def process_fsm_quantity_and_save(message: Message, state: FSMContext, ses
     trick = await session.get(Trick, trick_id)
     
     # 💥 Вызываем твой calculator.py, передавая ТЕПЕРЬ ДИНАМИЧЕСКИЙ execution_multiplier!
-    calc_points, calc_xp = calculate_single_trick(
+    calc_points, calc_xp = await calculate_single_trick(
         trick=trick,
         cone_line=cone_line,
         quantity=quantity,
@@ -426,5 +537,5 @@ async def process_finish_workout(
 
     await callback.message.delete()
     await callback.message.answer(
-        summary_report, reply_markup=get_coach_main_menu()
+        summary_report, reply_markup=await get_coach_menu_for(session)
     )

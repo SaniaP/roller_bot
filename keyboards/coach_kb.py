@@ -18,11 +18,22 @@ class TrickAction(CallbackData, prefix="trck"):
     trick_id: Optional[int] = None
     log_id: Optional[int] = None
 
+class HandbookAction(CallbackData, prefix="hb"):
+    action: str        # "hb_cat", "hb_trick", "hb_back"
+    category: Optional[str] = None
+    trick_id: Optional[int] = None
+
 # --- Старые реплай-клавиатуры ---
 def get_coach_main_menu() -> ReplyKeyboardMarkup:
-    """Главное меню для роли Тренера"""
+    """Главное меню для роли Тренера (статичная версия: всегда "Начать тренировку")"""
+    return get_coach_main_menu_sync(has_active_workout=False)
+
+
+def get_coach_main_menu_sync(has_active_workout: bool) -> ReplyKeyboardMarkup:
+    """Главное меню тренера. Кнопка тренировки зависит от наличия активной тренировки в БД"""
     builder = ReplyKeyboardBuilder()
-    builder.row(KeyboardButton(text="🏋️ Начать тренировку"))
+    workout_btn_text = "🏋️ Продолжить тренировку" if has_active_workout else "🏋️ Начать тренировку"
+    builder.row(KeyboardButton(text=workout_btn_text))
     builder.row(
         KeyboardButton(text="👤 Добавить ученика"),
         KeyboardButton(text="📚 Справочник трюков")

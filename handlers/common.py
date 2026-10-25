@@ -5,12 +5,12 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select,delete
 
-from models import User
+from models import User, Workout
 from config import CHIEF_COACH_ID
 from states import SkaterRegistrationStates
 
 # Импортируем клавиатуры 
-from keyboards import get_coach_main_menu, get_skater_main_menu, get_role_selection_kb
+from keyboards import get_coach_main_menu, get_coach_main_menu_sync, get_skater_main_menu, get_role_selection_kb
 
 router = Router()
 
@@ -37,10 +37,14 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
 
     # 2. Если вошел Тренер
     if user.role == "coach":
+        # Проверяем, есть ли активная тренировка, чтобы показать кнопку «Продолжить»
+        active_w = (await session.execute(
+            select(Workout).where(Workout.status == "active")
+        )).scalar_one_or_none()
         await message.answer(
             f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{user.full_name}</b>!\n"
             "Все судейские связки и лимиты опыта активны. Выберите действие:",
-            reply_markup=get_coach_main_menu()
+            reply_markup=get_coach_main_menu_dynamic(has_active_workout=active_w is not None)
         )
 
     # 3. Если вошел Спортсмен (Ученик)
@@ -85,8 +89,11 @@ async def process_select_coach(callback: CallbackQuery, state: FSMContext, sessi
         f"👑 Авторизация успешна!\nСоздан профиль Тренера: <b>{full_name}</b>.\n"
         "Вам доступно управление тренировочным процессом.",
     )
-    # Выводим главное меню тренера
-    await callback.message.answer("Выберите действие:", reply_markup=get_coach_main_menu())
+    # Выводим главное меню тренера (с учётом активной тренировки)
+    active_w = (await session.execute(
+        select(Workout).where(Workout.status == "active")
+    )).scalar_one_or_none()
+    await callback.message.answer("Выберите действие:", reply_markup=get_coach_main_menu_dynamic(has_active_workout=active_w is not None))
     await callback.answer()
 
 
