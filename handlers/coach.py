@@ -246,64 +246,92 @@ async def process_fsm_track_coeff(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(WorkoutCreationStates.waiting_for_quantity)
-async def process_fsm_quantity_and_save(
-    message: Message, state: FSMContext, session: AsyncSession
-):
-    if not message.text.isdigit():
-        await message.answer("⚠️ Пожалуйста, введите количество ЦЕЛЫМ числом:")
+async def process_fsm_quantity_and_save(message: Message, state: FSMContext, session: AsyncSession):
+    text_input = message.text.strip().replace(" ", "") # Убираем пробелы
+    
+    # Регулярное выражение для поиска форматов: "8", "8,-10", "11,+20", "11,20"
+    match = re.match(r"^(\d+)(?:,([+-]?\d+))?$", text_input)
+    
+    if not match:
+        await message.answer(
+            "⚠️ **Неверный формат ввода!**\n\n"
+            "Пожалуйста, введите данные строго по шаблону:\n"
+            "• Просто число конусов: `9` (без поправок)\n"
+            "• Со штрафом: `8,-10` (минус 10% к качеству)\n"
+            "• С бонусом: `11,20` (плюс 20% к качеству)",
+            parse_mode="Markdown"
+        )
         return
+        
+    # Извлекаем количество конусов
+    quantity = int(match.group(1))
+    
+    # Извлекаем поправку в % (если она введена)
+    percentage_mod = match.group(2)
+    if percentage_mod:
+        # Переводим проценты в множитель качества (например, -10 -> 0.9, +20 -> 1.2)
+        execution_multiplier = 1.0 + (int(percentage_mod) / 100.0)
+        # Защита от дурака: множитель качества выполнения не должен быть отрицательным
+        if execution_multiplier < 0:
+            execution_multiplier = 0.0
+    else:
+        execution_multiplier = 1.0
 
-    quantity = int(message.text)
     data = await state.get_data()
-    await state.clear()  # Очищаем стейт, уходим обратно в инлайн-навигацию
-
+    await state.clear() # Очищаем стейт FSM, возвращаемся в инлайн-меню
+    
     workout_id = data["workout_id"]
     student_id = data["student_id"]
     trick_id = data["trick_id"]
     cone_line = data["cone_line"]
-
+    
     student = await session.get(User, student_id)
     trick = await session.get(Trick, trick_id)
-
-    # Считаем калькулятором (execution_multiplier равен 1.0, пока нет логики штрафов)
-    calc_points, calc_xp = await calculate_single_trick(
+    
+    # 💥 Вызываем твой calculator.py, передавая ТЕПЕРЬ ДИНАМИЧЕСКИЙ execution_multiplier!
+    calc_points, calc_xp = calculate_single_trick(
         trick=trick,
         cone_line=cone_line,
         quantity=quantity,
-        execution_multiplier=1.0,
+        execution_multiplier=execution_multiplier,
         skater_level=student.level,
-        db_session=session,
+        db_session=session
     )
-
-    # Записываем подход в лог
+    
+    # Сохраняем в лог подходов с учетом введенной точности
     new_log = TrickLog(
         workout_id=workout_id,
         student_id=student_id,
         trick_id=trick_id,
         cone_line=cone_line,
         quantity=quantity,
-        execution_multiplier=1.0,
+        execution_multiplier=execution_multiplier, # Записываем точный коэфф
         calculated_points=calc_points,
-        calculated_xp=calc_xp,
+        calculated_xp=calc_xp
     )
     session.add(new_log)
     await session.commit()
-
-    # Возвращаем тренера к карточке ученика через Inline
+    
+    # Генерируем кнопку возврата
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="🔄 Вернуться в карточку спортсмена",
-        callback_data=WorkoutAction(
-            action="select_skater",
-            workout_id=workout_id,
-            student_id=student_id,
-        ),
+        text="🔄 Вернуться в карточку спортсмена", 
+        callback_data=WorkoutAction(action="select_skater", workout_id=workout_id, student_id=student_id)
     )
+    
+    # Формируем красивый отчет о добавлении
+    accuracy_text = f"{percentage_mod}%" if percentage_mod else "без изменений"
+    if percentage_mod and not percentage_mod.startswith(("-", "+")):
+        accuracy_text = f"+{percentage_mod}%"
 
     await message.answer(
-        f"✅ Трюк {trick.name} успешно добавлен спортсмену {student.full_name}!\n"
-        f"➕ Набрано: {calc_points} баллов | +{calc_xp} XP",
+        f"✅ Трюк <b>{trick.name}</b> успешно добавлен!\n\n"
+        f"📊 **Параметры подхода:**\n"
+        f"• Количество конусов: <code>{quantity}</code>\n"
+        f"• Точность выполнения: <code>{accuracy_text}</code> (коэфф. {execution_multiplier:.2f})\n\n"
+        f"✨ **Начислено:** +{calc_points} баллов | +{calc_xp} XP",
         reply_markup=builder.as_markup(),
+        parse_mode="HTML"
     )
 
 
