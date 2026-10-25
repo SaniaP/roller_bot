@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select,delete
 
 from models import User
 from config import CHIEF_COACH_ID
@@ -209,4 +209,20 @@ async def set_role_coach(message: Message, session: AsyncSession):
         "Теперь ты можешь управлять тренировками и подтверждать трюки!",
         # reply_markup=get_coach_main_menu(), # Раскомментируй, если кнопка готова
         parse_mode="Markdown"
+    )
+
+@router.message(Command("reset"))
+async def cmd_reset_profile(message: Message, state: FSMContext, session: AsyncSession):
+    """Секретная команда для сброса профиля (удаления из БД)"""
+    await state.clear()
+    tg_id = message.from_user.id
+    
+    # Стираем пользователя из базы данных по его Telegram ID
+    query = delete(User).where(User.telegram_id == tg_id)
+    await session.execute(query)
+    # commit выполнится автоматически вашей Middleware!
+    
+    await message.answer(
+        "🗑 <b>Ваш профиль успешно удален из базы данных!</b>\n"
+        "Теперь вы можете ввести /start, чтобы пройти регистрацию заново, как в самый первый раз."
     )
