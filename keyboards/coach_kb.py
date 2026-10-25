@@ -1,6 +1,24 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.filters.callback_data import CallbackData
+from typing import Optional
+from models import User, Trick, TrickLog
 
+# --- Фабрики Callback Data для безопасной передачи параметров ---
+class WorkoutAction(CallbackData, prefix="wrk"):
+    action: str        # "start_session", "add_skater_to_w", "select_skater", "finish_workout"
+    workout_id: Optional[int] = None
+    student_id: Optional[int] = None
+
+class TrickAction(CallbackData, prefix="trck"):
+    action: str        # "choose_cat", "choose_trick", "log_trick", "delete_log"
+    workout_id: int
+    student_id: int
+    category: Optional[str] = None
+    trick_id: Optional[int] = None
+    log_id: Optional[int] = None
+
+# --- Старые реплай-клавиатуры ---
 def get_coach_main_menu() -> ReplyKeyboardMarkup:
     """Главное меню для роли Тренера"""
     builder = ReplyKeyboardBuilder()
@@ -17,3 +35,90 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(KeyboardButton(text="❌ Отмена"))
     return builder.as_markup(resize_keyboard=True)
+
+# --- Новые Инлайн-клавиатуры для ведения тренировки тренером ---
+def get_active_workout_kb(workout_id: int, current_students: list[User]) -> InlineKeyboardMarkup:
+    """Экран: Идет тренировка. Позволяет добавлять учеников и переходить в их карточки"""
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопка добавления спортсмена в текущую сессию
+    builder.button(
+        text="➕ Добавить ученика в тренировку", 
+        callback_data=WorkoutAction(action="add_skater_to_w", workout_id=workout_id)
+    )
+    
+    # Кнопки для каждого добавленного спортсмена
+    for student in current_students:
+        builder.button(
+            text=f"🏃‍♂️ {student.full_name}", 
+            callback_data=WorkoutAction(action="select_skater", workout_id=workout_id, student_id=student.id)
+        )
+        
+    builder.button(
+        text="🏁 Завершить тренировку и посчитать итоги", 
+        callback_data=WorkoutAction(action="finish_workout", workout_id=workout_id)
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_skater_workout_card_kb(workout_id: int, student_id: int, logs: list[TrickLog]) -> InlineKeyboardMarkup:
+    """Последний ярус: Карточка управления трюками конкретного спортсмена"""
+    builder = InlineKeyboardBuilder()
+    
+    builder.button(
+        text="➕ Добавить трюк спортсмену", 
+        callback_data=TrickAction(action="choose_cat", workout_id=workout_id, student_id=student_id)
+    )
+    
+    # Если трюки уже внесены, выводим кнопку удаления последнего или редактирования
+    if logs:
+        builder.button(
+            text="🗑 Отменить последний трюк", 
+            callback_data=TrickAction(action="delete_log", workout_id=workout_id, student_id=student_id, log_id=logs[-1].id)
+        )
+        
+    builder.button(
+        text="⬅️ Назад к списку тренировки", 
+        callback_data=WorkoutAction(action="select_skater", workout_id=workout_id)
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_categories_kb(workout_id: int, student_id: int, categories: list[str]) -> InlineKeyboardMarkup:
+    """Выбор категории трюка из справочника"""
+    builder = InlineKeyboardBuilder()
+    for cat in categories:
+        builder.button(
+            text=str(cat).capitalize(), 
+            callback_data=TrickAction(action="choose_trick", workout_id=workout_id, student_id=student_id, category=cat)
+        )
+    builder.button(
+        text="❌ Отмена", 
+        callback_data=WorkoutAction(action="select_skater", workout_id=workout_id, student_id=student_id)
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_tricks_by_cat_kb(workout_id: int, student_id: int, tricks: list[Trick]) -> InlineKeyboardMarkup:
+    """Выбор конкретного трюка из выбранной категории"""
+    builder = InlineKeyboardBuilder()
+    for trick in tricks:
+        builder.button(
+            text=f"{trick.name} (Tier {trick.trick_tier})", 
+            callback_data=TrickAction(action="log_trick", workout_id=workout_id, student_id=student_id, trick_id=trick.id)
+        )
+    builder.button(
+        text="⬅️ К категориям", 
+        callback_data=TrickAction(action="choose_cat", workout_id=workout_id, student_id=student_id)
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_track_coeff_kb() -> InlineKeyboardMarkup:
+    """Выбор размера дорожки конусов"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="50 см", callback_data="cone_50")
+    builder.button(text="80 см", callback_data="cone_80")
+    builder.button(text="120 см", callback_data="cone_120")
+    builder.adjust(3)
+    return builder.as_markup()

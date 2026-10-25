@@ -1,437 +1,401 @@
 import logging
-from datetime import datetime, date
+from datetime import datetime
 from aiogram import Router, F
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, delete
 
 from models import User, Workout, WorkoutRegistration, TrickLog, Trick
-#сделать красиво.! иначе зачем нам инит states файл ?
 from states.coach_states import CoachRegistrationStates, WorkoutCreationStates
-from keyboards.coach_kb import get_coach_main_menu, get_cancel_keyboard
-from keyboards import get_skater_main_menu
-from calculator import check_workout_diversity_penalty
+from keyboards.coach_kb import (
+    get_coach_main_menu, get_cancel_keyboard,
+    get_active_workout_kb, get_skater_workout_card_kb,
+    get_categories_kb, get_tricks_by_cat_kb, get_track_coeff_kb,
+    WorkoutAction, TrickAction
+)
+from calculator import calculate_single_trick, calculate_current_workout_totals, check_level_up
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 # ==========================================
-# 0. СИСТЕМНЫЕ КОМАНДЫ (ОТМЕНА)
+# 0. СИСТЕМНЫЕ КОМАНДЫ И ОБРАБОТКА ОБРАТНОЙ СОВМЕСТИМОСТИ
 # ==========================================
 
 @router.message(F.text == "❌ Отмена")
 async def cmd_cancel(message: Message, state: FSMContext):
-    """Универсальная отмена для выхода из любого стейта тренера"""
     await state.clear()
-    await message.answer(
-        "❌ Действие отменено. Возвращаю вас в главное меню.",
-        reply_markup=get_coach_main_menu()
+    await message.answer("❌ Действие отменено. Возвращаю вас в главное меню.", reply_markup=get_coach_main_menu())
+
+# Перехватываем старый роутинг из меню выбора ролей (если он прилетает строкой)
+@router.callback_query(F.data == "select_role_coach")
+async def process_select_role_coach(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        text="🔑 Вы вошли в панель тренера. Используйте нижнее меню бота для управления.",
+        reply_markup=None
     )
+    await callback.message.answer("Главное меню тренера загружено:", reply_markup=get_coach_main_menu())
 
 # ==========================================
-# 1. РУЧНОЕ ДОБАВЛЕНИЕ УЧЕНИКА ТРЕНЕРОМ
+# 1. РУЧНОЕ ДОБАВЛЕНИЕ УЧЕНИКА ТРЕНЕРОМ (ОСТАВЛЯЕМ КАК ЕСТЬ)
 # ==========================================
-
 @router.message(F.text == "👤 Добавить ученика")
 async def coach_add_student_start(message: Message, state: FSMContext):
-    """Начало квеста создания профиля нового ученика руками тренера"""
     await message.answer(
-        "📝 Вы инициировали ручное добавление ученика.\n"
-        "Пожалуйста, введите его <b>Фамилию и Имя</b> (например: Семенов Игорь):",
+        "📝 Вы инициировали ручное добавление ученика.\nВведите его <b>Фамилию и Имя</b>:",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(CoachRegistrationStates.waiting_for_name)
 
 @router.message(CoachRegistrationStates.waiting_for_name)
 async def coach_add_student_name(message: Message, state: FSMContext):
-    """Принимаем имя создаваемого ученика"""
     full_name = message.text.strip()
     if len(full_name) < 3 or " " not in full_name:
-        await message.answer("⚠️ Введите корректно Фамилию и Имя через пробел (например: Петров Петр):")
+        await message.answer("⚠️ Введите корректно Фамилию и Имя через пробел:")
         return
-
     await state.update_data(full_name=full_name)
-    await message.answer(
-        f"Имя принято: <b>{full_name}</b>.\n"
-        "Теперь введите его <b>дату рождения</b> в формате <code>ДД.ММ.ГГГГ</code> (например: 15.08.2012):"
-    )
+    await message.answer(f"Имя принято: <b>{full_name}</b>.\nТеперь введите его <b>дату рождения</b> (ДД.ММ.ГГГГ):")
     await state.set_state(CoachRegistrationStates.waiting_for_birth_date)
 
 @router.message(CoachRegistrationStates.waiting_for_birth_date)
 async def coach_add_student_finish(message: Message, state: FSMContext, session: AsyncSession):
-    """Валидируем дату и окончательно сохраняем нового ученика без привязки к TG ID"""
     date_text = message.text.strip()
     try:
         birth_date = datetime.strptime(date_text, "%d.%m.%Y").date()
     except ValueError:
-        await message.answer("⚠️ Неверный формат даты. Используйте <code>ДД.ММ.ГГГГ</code>:")
+        await message.answer("⚠️ Неверный формат даты. Используйте ДД.ММ.ГГГГ:")
         return
 
     data = await state.get_data()
-    full_name = data.get("full_name")
-
-    # Создаем ученика. telegram_id=None означает, что профиль локальный (создан тренером)
     new_student = User(
         telegram_id=None,
-        full_name=full_name,
+        full_name=data.get("full_name"),
         birth_date=birth_date,
         role="student",
-        is_approved=True  # Раз добавил тренер, значит профиль подтвержден
+        is_approved=True
     )
     session.add(new_student)
+    await session.commit()
     await state.clear()
-
-    await message.answer(
-        f"🎉 Профиль ученика <b>{full_name}</b> успешно создан!\n"
-        f"Он сможет заниматься, когда вы добавите его в открытую тренировку.",
-        reply_markup=get_coach_main_menu()
-    )
+    await message.answer(f"🎉 Профиль ученика успешно создан!", reply_markup=get_coach_main_menu())
 
 # ==========================================
-# 2. УПРАВЛЕНИЕ ТРЕНИРОВКАМИ (ОТКРЫТИЕ СЕССИИ)
+# 2. НОВАЯ ЛОГИКА ТРЕНИРОВКИ (ОБНОВЛЕННЫЙ ПУНКТ 1.1)
 # ==========================================
 
 @router.message(F.text == "🏋️ Начать тренировку")
 async def coach_start_workout(message: Message, session: AsyncSession):
-    """Создает новую активную тренировочную сессию"""
-    # Проверяем, нет ли уже запущенной тренировки
+    """Инициализация тренировки. Проверяем активные, если нет — создаем"""
     query = select(Workout).where(Workout.status == "active")
-    result = await session.execute(query)
-    active_workout = result.scalar_one_or_none()
+    active_workout = (await session.execute(query)).scalar_one_or_none()
 
     if active_workout:
         await message.answer(
-            "⚠️ У вас уже есть активная тренировка! "
-            "Сначала закройте текущую сессию перед созданием новой.",
-            reply_markup=get_coach_main_menu()
+            "⚠️ У вас уже есть активная тренировка! Управляйте ей ниже:",
+            reply_markup=get_active_workout_kb(active_workout.id, [])
         )
         return
 
-    # Создаем новую тренировку на текущую дату и время
-    new_workout = Workout(
-        date=datetime.now(),
-        status="active"
-    )
+    new_workout = Workout(date=datetime.now(), status="active")
     session.add(new_workout)
+    await session.commit()
     
     await message.answer(
-        "🚀 <b>Тренировочная сессия успешно открыта!</b>\n"
-        "Теперь ученики могут подключаться к ней со своих телефонов, "
-        "вносить трюки и зарабатывать опыт.",
-        reply_markup=get_coach_main_menu()
+        "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nДобавьте спортсменов из БД, чтобы начать фиксацию результатов.",
+        reply_markup=get_active_workout_kb(new_workout.id, [])
     )
 
-# ==========================================
-# 3. ПРОВЕРКА И ЗАКРЫТИЕ ТРЕНИРОВКИ
-# ==========================================
-
-@router.message(F.text == "🔔 Проверить тренировки учеников")
-async def coach_review_and_close_workout(message: Message, session: AsyncSession):
-    """Показывает статус текущей активной тренировки и закрывает её с расчетом баллов"""
-    # Находим активную сессию
-    query = select(Workout).where(Workout.status == "active")
-    result = await session.execute(query)
-    workout = result.scalar_one_or_none()
-
-    if not workout:
-        await message.answer("❌ В данный момент нет активных тренировок.")
-        return
-
-    # Запрашиваем всех записавшихся на эту тренировку учеников
-    reg_query = select(WorkoutRegistration, User).join(
-        User, WorkoutRegistration.student_id == User.id
-    ).where(WorkoutRegistration.workout_id == workout.id)
+@router.callback_query(WorkoutAction.filter(F.action == "add_skater_to_w"))
+async def add_skater_from_db_list(callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession):
+    """Вывод списка спортсменов из БД, которых еще нет в текущей сессии"""
+    workout_id = callback_data.workout_id
     
-    reg_result = await session.execute(reg_query)
-    registrations = reg_result.all()
-
-    if not registrations:
-        # Если никто не пришел, тренер может просто закрыть её без штрафов
-        workout.status = "closed"
-        await message.answer(
-            "📭 На тренировку никто не записался. Сессия автоматически закрыта.",
-            reply_markup=get_coach_main_menu()
-        )
-        return
-
-    report_text = f"📋 <b>Итоги тренировочной сессии от {workout.date.strftime('%d.%m.%Y')}:</b>\n\n"
-
-    # Обрабатываем результаты каждого ученика
-    for reg, student in registrations:
-        # Считаем уникальные категории трюков, которые ученик сделал за сегодня
-        log_query = select(Trick.category).join(
-            TrickLog, TrickLog.trick_id == Trick.id
-        ).where(
-            TrickLog.workout_id == workout.id, 
-            TrickLog.student_id == student.id
-        ).distinct()
-        
-        log_result = await session.execute(log_query)
-        categories_used = len(log_result.scalars().all())
-
-        # Применяем проверку разнообразия к набранным тех. баллам
-        # В вашей логике: penalty режет опыт/очки, если категорий меньше нормы уровня
-        final_points = check_workout_diversity_penalty(
-            skater_level=student.level,
-            categories_used=categories_used,
-            base_xp=int(reg.training_points) # передаем набранные тех. баллы
-        )
-        
-        # Обновляем финальные тех. очки в записи регистрации
-        reg.training_points = final_points
-
-        report_text += (
-            f"👤 Роллер: <b>{student.full_name}</b>\n"
-            f"   Level: {student.level} | Задействовано категорий: {categories_used}\n"
-            f"   Набрано тех. баллов: <b>{final_points}</b>\n"
-            f"   Получено опыта за сессию: +<b>{reg.training_xp} XP</b>\n\n"
-        )
-
-    # Меняем статус тренировки на закрытый
-    workout.status = "closed"
+    # Субквери: кого уже добавили
+    sub_q = select(WorkoutRegistration.student_id).where(WorkoutRegistration.workout_id == workout_id)
+    sub_res = await session.execute(sub_q)
+    added_ids = sub_res.scalars().all()
     
-    await message.answer(
-        report_text + "🔒 <b>Тренировка успешно проверена, все баллы зафиксированы и закрыты!</b>",
-        reply_markup=get_coach_main_menu()
-    )
-
-@router.message(F.text == "📚 Справочник трюков")
-async def coach_tricks_directory(message: Message, session: AsyncSession):
-    """Вспомогательный хэндлер: показывает тренеру список трюков в базе для тестов"""
-    query = select(Trick).limit(10)
-    result = await session.execute(query)
-    tricks = result.scalars().all()
+    # Достаем остальных
+    stmt = select(User).where(User.role == "student")
+    if added_ids:
+        stmt = stmt.where(User.id.not_in(added_ids))
+        
+    students = (await session.execute(stmt)).scalars().all()
     
-    if not tricks:
-        await message.answer("📭 Справочник трюков пуст. Запустите seed_db.py.")
-        return
-        
-    text = "📚 <b>Доступные трюки для тестирования:</b>\n\n"
-    for t in tricks:
-        text += f"🔹 {t.name} (Кат: {t.category}, Базовые очки: {t.base_tech_points})\n"
-        
-    await message.answer(text)
-
-# ==========================================
-# 4. ЗАПОЛНЕНИЕ ТРЕНИРОВКИ ТРЕНЕРОМ ЗА УЧЕНИКА
-# ==========================================
-
-@router.message(F.text == "🏋️ Начать тренировку") # Изменим этот хэндлер, чтобы он давал выбор
-async def coach_start_workout(message: Message, session: AsyncSession):
-    """Открывает сессию или, если она уже открыта, предлагает вносить данные"""
-    query = select(Workout).where(Workout.status == "active")
-    result = await session.execute(query)
-    active_workout = result.scalar_one_or_none()
-
-    if not active_workout:
-        # Если тренировки нет — создаем
-        active_workout = Workout(date=datetime.now(), status="active")
-        session.add(active_workout)
-        await session.commit()
-        await message.answer("🚀 Тренировочная сессия успешно открыта!")
-
-    # Выводим дополнительное меню для тренера (можно просто текстом с инструкцией)
-    await message.answer(
-        "Вы можете вносить трюки за учеников. \n"
-        "Чтобы записать трюк, используйте команду: /add_trick_for_student"
-    )
-
-@router.message(Command("add_trick_for_student"))
-async def coach_trick_for_student_start(message: Message, state: FSMContext, session: AsyncSession):
-    """Начало квеста: Тренер выбирает, какому ученику записать трюк"""
-    # Проверяем, открыта ли тренировка
-    query = select(Workout).where(Workout.status == "active")
-    result = await session.execute(query)
-    active_workout = result.scalar_one_or_none()
-
-    if not active_workout:
-        await message.answer("❌ Сначала откройте тренировку нажав '🏋️ Начать тренировку'")
-        return
-
-    # Вытаскиваем всех учеников из базы, чтобы тренер выбрал одного
-    students_query = select(User).where(User.role == "student")
-    students_res = await session.execute(students_query)
-    students = students_res.scalars().all()
-
     if not students:
-        await message.answer("📭 В школе пока нет учеников. Сначала добавьте их!")
+        await callback.answer("Все доступные ученики из базы данных уже на тренировке!", show_alert=True)
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for skater in students:
+        builder.button(
+            text=skater.full_name, 
+            callback_data=WorkoutAction(action="select_skater", workout_id=workout_id, student_id=skater.id)
+        )
+    builder.button(text="⬅️ Назад", callback_data=WorkoutAction(action="select_skater", workout_id=workout_id))
+    builder.adjust(1)
+    
+    await callback.message.edit_text("Выберите ученика для добавления в тренировку:", reply_markup=builder.as_markup())
+
+@router.callback_query(WorkoutAction.filter(F.action == "select_skater"))
+async def show_skater_card_or_main_list(callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession):
+    """Ярус карточки спортсмена: показывает текущий лвл, опыт и предварительный балл"""
+    workout_id = callback_data.workout_id
+    student_id = callback_data.student_id
+    
+    # Если student_id пустой — возвращаемся к главному списку тренировки
+    if not student_id:
+        reg_stmt = select(WorkoutRegistration).where(WorkoutRegistration.workout_id == workout_id)
+        regs = (await session.execute(reg_stmt)).scalars().all()
+        
+        current_students = []
+        for r in regs:
+            st = await session.get(User, r.student_id)
+            if st: current_students.append(st)
+            
+        await callback.message.edit_text(
+            "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nСписок спортсменов на занятии:",
+            reply_markup=get_active_workout_kb(workout_id, current_students)
+        )
         return
 
-    # Строим клавиатуру со списком учеников
-    builder = ReplyKeyboardBuilder()
-    for student in students:
-        builder.add(KeyboardButton(text=student.full_name))
-    builder.adjust(2)
-    builder.row(KeyboardButton(text="❌ Отмена"))
-
-    await state.update_data(workout_id=active_workout.id)
-    await message.answer("👥 Выберите ученика из списка:", reply_markup=builder.as_markup(resize_keyboard=True))
-    await state.set_state(WorkoutCreationStates.waiting_for_skater)
-
-@router.message(WorkoutCreationStates.waiting_for_skater)
-async def coach_trick_for_student_skater(message: Message, state: FSMContext, session: AsyncSession):
-    """Принимаем выбор ученика и выводим список трюков"""
-    skater_name = message.text.strip()
-    
-    # Ищем ученика по имени
-    query = select(User).where(User.full_name == skater_name, User.role == "student")
-    res = await session.execute(query)
-    student = res.scalar_one_or_none()
-
-    if not student:
-        await message.answer("⚠️ Выберите ученика с помощью кнопок на клавиатуре!")
-        return
-
-    # Автоматически регистрируем ученика на тренировку, если он еще не записан
-    data = await state.get_data()
-    workout_id = data.get("workout_id")
-    
-    reg_query = select(WorkoutRegistration).where(
-        WorkoutRegistration.workout_id == workout_id,
-        WorkoutRegistration.student_id == student.id
+    # Если передан student_id — проверяем/создаем регистрацию на тренировку
+    reg_stmt = select(WorkoutRegistration).where(
+        WorkoutRegistration.workout_id == workout_id, 
+        WorkoutRegistration.student_id == student_id
     )
-    reg_res = await session.execute(reg_query)
-    reg = reg_res.scalar_one_or_none()
+    reg = (await session.execute(reg_stmt)).scalar_one_or_none()
     
     if not reg:
-        reg = WorkoutRegistration(workout_id=workout_id, student_id=student.id)
+        reg = WorkoutRegistration(workout_id=workout_id, student_id=student_id)
         session.add(reg)
-
-    await state.update_data(student_db_id=student.id, student_level=student.level)
-
-    # Выводим трюки
-    tricks_query = select(Trick)
-    tricks_res = await session.execute(tricks_query)
-    tricks = tricks_res.scalars().all()
-
-    builder = ReplyKeyboardBuilder()
-    for t in tricks:
-        builder.add(KeyboardButton(text=t.name))
-    builder.adjust(2)
-    builder.row(KeyboardButton(text="❌ Отмена"))
-
-    await message.answer(f"📚 Какой трюк выполнил <b>{student.full_name}</b>?", reply_markup=builder.as_markup(resize_keyboard=True))
-    await state.set_state(WorkoutCreationStates.waiting_for_trick)
-
-@router.message(WorkoutCreationStates.waiting_for_trick)
-async def coach_trick_for_student_trick(message: Message, state: FSMContext, session: AsyncSession):
-    """Принимаем трюк и спрашиваем количество"""
-    trick_name = message.text.strip()
-    
-    query = select(Trick).where(Trick.name == trick_name)
-    res = await session.execute(query)
-    trick = res.scalar_one_or_none()
-
-    if not trick:
-        await message.answer("⚠️ Выберите трюк из списка!")
-        return
-
-    await state.update_data(trick_id=trick.id, trick_measurement=trick.measurement_type)
-    
-    prompt = "Укажите количество конусов:" if trick.measurement_type == "cones" else "Укажите количество повторений:"
-    await message.answer(prompt, reply_markup=get_cancel_keyboard())
-    await state.set_state(WorkoutCreationStates.waiting_for_quantity)
-
-@router.message(WorkoutCreationStates.waiting_for_quantity)
-async def coach_trick_for_student_qty(message: Message, state: FSMContext):
-    """Принимаем количество и, если нужно, просим шаг дорожки"""
-    try:
-        quantity = int(message.text.strip())
-        if quantity <= 0: raise ValueError
-    except ValueError:
-        await message.answer("⚠️ Введите целое положительное число:")
-        return
-
-    data = await state.get_data()
-    await state.update_data(quantity=quantity)
-
-    if data.get("trick_measurement") == "reps":
-        # Если повторения — дорожка не нужна, завершаем расчет прямо тут
-        await state.update_data(track_coeff="coeff_80") # дефолт коэффициент 1.0
-        await save_trick_by_coach(message, state)
-    else:
-        # Если конусы — просим выбрать дорожку
-        builder = ReplyKeyboardBuilder()
-        builder.row(KeyboardButton(text="50 см"), KeyboardButton(text="80 см"), KeyboardButton(text="120 см"))
-        builder.row(KeyboardButton(text="❌ Отмена"))
-        await message.answer("📐 Выберите шаг дорожки:", reply_markup=builder.as_markup(resize_keyboard=True))
-        await state.set_state(WorkoutCreationStates.waiting_for_track_coeff)
-
-@router.message(WorkoutCreationStates.waiting_for_track_coeff)
-async def coach_trick_for_student_coeff(message: Message, state: FSMContext):
-    """Принимаем шаг дорожки и финишируем"""
-    choice = message.text.strip()
-    if choice == "50 см": field = "coeff_50"
-    elif choice == "80 см": field = "coeff_80"
-    elif choice == "120 см": field = "coeff_120"
-    else:
-        await message.answer("⚠️ Выберите вариант на клавиатуре!")
-        return
-
-    await state.update_data(selected_coeff_field=field)
-    await save_trick_by_coach(message, state)
-
-# Функция сохранения лога тренером (внутри handlers/coach.py)
-async def save_trick_by_coach(message: Message, state: FSMContext):
-    from database import async_session
-    from calculator import calculate_trick_xp_and_points
-    from models import XpPenalty, LevelExperience
-    
-    data = await state.get_data()
-    workout_id = data.get("workout_id")
-    student_db_id = data.get("student_db_id")
-    trick_id = data.get("trick_id")
-    quantity = data.get("quantity")
-    coeff_field = data.get("selected_coeff_field", "coeff_80")
-
-    async with async_session() as session:
-        trick = await session.get(Trick, trick_id)
-        student = await session.get(User, student_db_id)
-        
-        coeff = getattr(trick, coeff_field, 1.0)
-        raw_xp, calculated_points = calculate_trick_xp_and_points(trick, quantity, coeff)
-        
-        # Штраф за разницу уровней
-        lvl_diff = max(0, student.level - trick.trick_tier)
-        p_res = await session.execute(select(XpPenalty).where(XpPenalty.level_difference == lvl_diff))
-        penalty = p_res.scalar_one_or_none()
-        xp_multiplier = penalty.xp_multiplier if penalty else 1.0
-        final_xp = int(raw_xp * xp_multiplier)
-
-        # Начисляем опыт ученику на лету
-        student.xp += final_xp
-        
-        # Проверка Level Up
-        level_up = False
-        while True:
-            nl_res = await session.execute(select(LevelExperience).where(LevelExperience.level == student.level + 1))
-            next_lvl = nl_res.scalar_one_or_none()
-            if next_lvl and student.xp >= next_lvl.required_xp:
-                student.level += 1
-                level_up = True
-            else:
-                break
-
-        # Пишем в логи трюков
-        new_log = TrickLog(workout_id=workout_id, student_id=student_db_id, trick_id=trick_id)
-        session.add(new_log)
-
-        # Обновляем регистрацию тренировки
-        reg_res = await session.execute(select(WorkoutRegistration).where(
-            WorkoutRegistration.workout_id == workout_id, WorkoutRegistration.student_id == student_db_id
-        ))
-        reg = reg_res.scalar_one()
-        reg.training_xp += final_xp
-        reg.training_points += calculated_points
-        
         await session.commit()
 
-    await state.clear()
-    res_msg = f"✅ Трюк успешно записан ученику <b>{student.full_name}</b>!\nПолучено: +{final_xp} XP."
-    if level_up:
-        res_msg += f"\n🎉 Ученик поднял уровень! Новый левел: <b>{student.level}</b>!"
-        
-    await message.answer(res_msg, reply_markup=get_coach_main_menu())
+    student = await session.get(User, student_id)
+    
+    # Тянем все логи трюков этого ученика за текущую сессию
+    logs_stmt = select(TrickLog).where(TrickLog.workout_id == workout_id, TrickLog.student_id == student_id)
+    logs = (await session.execute(logs_stmt)).scalars().all()
+    
+    # Калькуляция результатов «на лету»
+    current_sport_score, current_xp_gain = await calculate_current_workout_totals(list(logs), student, session)
+    
+    card_text = (
+        f"👤 **Спортсмен:** {student.full_name}\n"
+        f"🎮 **Ранг:** {student.title} (Уровень: {student.level})\n"
+        f"✨ **Текущий опыт:** {student.xp} XP\n\n"
+        f"📊 **Предварительные итоги сессии:**\n"
+        f" — Средний спортивный балл: <b>{current_sport_score}</b>\n"
+        f" — Набрано опыта за сегодня: <b>+{current_xp_gain} XP</b>"
+    )
+    
+    await callback.message.edit_text(text=card_text, reply_markup=get_skater_workout_card_kb(workout_id, student_id, list(logs)))
+
+# ==========================================
+# 3. ПОШАГОВЫЙ ИНЛАЙН-ВВОД ТРЮКОВ ТРЕНЕРОМ
+# ==========================================
+
+@router.callback_query(TrickAction.filter(F.action == "choose_cat"))
+async def process_choose_category(callback: CallbackQuery, callback_data: TrickAction, session: AsyncSession):
+    cats_stmt = select(Trick.category).distinct()
+    categories = (await session.execute(cats_stmt)).scalars().all()
+    
+    await callback.message.edit_text(
+        "Выберите категорию трюка:",
+        reply_markup=get_categories_kb(callback_data.workout_id, callback_data.student_id, list(categories))
+    )
+
+@router.callback_query(TrickAction.filter(F.action == "choose_trick"))
+async def process_choose_trick(callback: CallbackQuery, callback_data: TrickAction, session: AsyncSession):
+    tricks_stmt = select(Trick).where(Trick.category == callback_data.category)
+    tricks = (await session.execute(tricks_stmt)).scalars().all()
+    
+    await callback.message.edit_text(
+        f"Категория: {callback_data.category.upper()}. Выберите трюк:",
+        reply_markup=get_tricks_by_cat_kb(callback_data.workout_id, callback_data.student_id, list(tricks))
+    )
+
+@router.callback_query(TrickAction.filter(F.action == "log_trick"))
+async def start_fsm_trick_params(callback: CallbackQuery, callback_data: TrickAction, state: FSMContext):
+    """Переходим в FSM, сохраняем контекст и запрашиваем дорожку"""
+    await state.update_data(
+        workout_id=callback_data.workout_id,student_id=callback_data.student_id,
+trick_id=callback_data.trick_id
+)
+
+    await callback.message.edit_text("Выберите размер дорожки (конусов):", reply_markup=get_track_coeff_kb())
+    await state.set_state(WorkoutCreationStates.waiting_for_track_coeff)
+
+@router.callback_query(
+    WorkoutCreationStates.waiting_for_track_coeff, F.data.startswith("cone_")
+)
+async def process_fsm_track_coeff(callback: CallbackQuery, state: FSMContext):
+    # Разделяем callback_data и забираем размер конуса ("50", "80", "120")
+    cone_size = callback.data.split("_")[1]
+    await state.update_data(cone_line=cone_size)
+
+    # Убираем инлайн-кнопки, запрашиваем ввод текстом через Reply-отмену
+    await callback.message.delete()
+    await callback.message.answer(
+        "🔢 Введите количество выполненных конусов/повторений (числом):",
+        reply_markup=get_cancel_keyboard(),
+    )
+    await state.set_state(WorkoutCreationStates.waiting_for_quantity)
+
+
+@router.message(WorkoutCreationStates.waiting_for_quantity)
+async def process_fsm_quantity_and_save(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    if not message.text.isdigit():
+        await message.answer("⚠️ Пожалуйста, введите количество ЦЕЛЫМ числом:")
+        return
+
+    quantity = int(message.text)
+    data = await state.get_data()
+    await state.clear()  # Очищаем стейт, уходим обратно в инлайн-навигацию
+
+    workout_id = data["workout_id"]
+    student_id = data["student_id"]
+    trick_id = data["trick_id"]
+    cone_line = data["cone_line"]
+
+    student = await session.get(User, student_id)
+    trick = await session.get(Trick, trick_id)
+
+    # Считаем калькулятором (execution_multiplier равен 1.0, пока нет логики штрафов)
+    calc_points, calc_xp = await calculate_single_trick(
+        trick=trick,
+        cone_line=cone_line,
+        quantity=quantity,
+        execution_multiplier=1.0,
+        skater_level=student.level,
+        db_session=session,
+    )
+
+    # Записываем подход в лог
+    new_log = TrickLog(
+        workout_id=workout_id,
+        student_id=student_id,
+        trick_id=trick_id,
+        cone_line=cone_line,
+        quantity=quantity,
+        execution_multiplier=1.0,
+        calculated_points=calc_points,
+        calculated_xp=calc_xp,
+    )
+    session.add(new_log)
+    await session.commit()
+
+    # Возвращаем тренера к карточке ученика через Inline
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🔄 Вернуться в карточку спортсмена",
+        callback_data=WorkoutAction(
+            action="select_skater",
+            workout_id=workout_id,
+            student_id=student_id,
+        ),
+    )
+
+    await message.answer(
+        f"✅ Трюк {trick.name} успешно добавлен спортсмену {student.full_name}!\n"
+        f"➕ Набрано: {calc_points} баллов | +{calc_xp} XP",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(TrickAction.filter(F.action == "delete_log"))
+async def delete_last_trick_log(
+    callback: CallbackQuery,
+    callback_data: TrickAction,
+    session: AsyncSession,
+):
+    """Отмена ошибочно внесенного трюка"""
+    stmt = delete(TrickLog).where(TrickLog.id == callback_data.log_id)
+    await session.execute(stmt)
+    await session.commit()
+
+    await callback.answer("Последний трюк успешно отменен!", show_alert=True)
+
+    # Перерисовываем карточку
+    redirect_action = WorkoutAction(
+        action="select_skater",
+        workout_id=callback_data.workout_id,
+        student_id=callback_data.student_id,
+    )
+    await show_skater_card_or_main_list(callback, redirect_action, session)
+
+
+# =====================================================================
+# 4. ФИНАЛИЗАЦИЯ ТРЕНИРОВКИ И LEVEL UP
+# =====================================================================
+
+
+@router.callback_query(WorkoutAction.filter(F.action == "finish_workout"))
+async def process_finish_workout(
+    callback: CallbackQuery,
+    callback_data: WorkoutAction,
+    session: AsyncSession,
+):
+    workout_id = callback_data.workout_id
+    workout = await session.get(Workout, workout_id)
+
+    if not workout:
+        await callback.answer("Ошибка: Тренировка не найдена", show_alert=True)
+        return
+
+    # Извлекаем все регистрации на эту тренировку
+    reg_stmt = select(WorkoutRegistration).where(
+        WorkoutRegistration.workout_id == workout_id
+    )
+    registrations = (await session.execute(reg_stmt)).scalars().all()
+
+    summary_report = "🏁 ТРЕНИРОВКА ЗАВЕРШЕНА И ПОСЧИТАНА!\n\n"
+
+    for reg in registrations:
+        student = await session.get(User, reg.student_id)
+
+        logs_stmt = select(TrickLog).where(
+            TrickLog.workout_id == workout_id,
+            TrickLog.student_id == student.id,
+        )
+        logs = (await session.execute(logs_stmt)).scalars().all()
+
+        # Считаем финальные итоги через калькулятор
+        final_sport_score, final_xp_gain = await calculate_current_workout_totals(
+            list(logs), student, session
+        )
+
+        # Обновляем регистрационную запись тренировки
+        reg.training_points = final_sport_score
+        reg.training_xp = final_xp_gain
+
+        # Начисляем опыт спортсмену глобально
+        student.xp += final_xp_gain
+
+        # Проверяем Level Up
+        new_level, level_upgraded = await check_level_up(
+            student.level, student.xp, session
+        )
+        lvl_up_text = ""
+
+        if level_upgraded:
+            student.level = new_level
+            lvl_up_text = f" 🔥 LEVEL UP! Новый уровень: {new_level}!"
+
+        summary_report += (
+            f"🏃‍♂️ {student.full_name}:\n"
+            f"Score: {final_sport_score} | XP: +{final_xp_gain}{lvl_up_text}\n\n"
+        )
+
+    # Закрываем тренировку
+    workout.status = "closed"
+    await session.commit()
+
+    await callback.message.delete()
+    await callback.message.answer(
+        summary_report, reply_markup=get_coach_main_menu()
+    )

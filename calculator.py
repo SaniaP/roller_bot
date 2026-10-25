@@ -6,13 +6,13 @@ from models import Trick, LevelExperience, XpPenalty, TrickLog, User
 
 logger = logging.getLogger(__name__)
 
-def calculate_single_trick(
-    trick: Trick, 
-    cone_line: str, 
-    quantity: int, 
+async def calculate_single_trick(
+    trick: Trick,
+    cone_line: str,
+    quantity: int,
     execution_multiplier: float,
     skater_level: int,
-    db_session: Session
+    db_session
 ) -> Tuple[float, int]:
     """
     Рассчитывает спортивные баллы (points) и игровой опыт (XP) за ОДИН подход трюка.
@@ -50,9 +50,9 @@ def calculate_single_trick(
     xp_multiplier = 1.0
     
     if level_diff > 0:
-        penalty = db_session.scalar(
+        penalty = (await db_session.scalar(
             select(XpPenalty).where(XpPenalty.level_difference == level_diff)
-        )
+        ))
         if penalty:
             xp_multiplier = penalty.xp_multiplier
 
@@ -61,10 +61,10 @@ def calculate_single_trick(
     return round(calculated_points, 2), max(0, calculated_xp)
 
 
-def calculate_current_workout_totals(
-    trick_logs: List[TrickLog], 
-    skater: User, 
-    db_session: Session
+async def calculate_current_workout_totals(
+    trick_logs: List[TrickLog],
+    skater: User,
+    db_session
 ) -> Tuple[float, int]:
     """
     Рассчитывает промежуточные или финальные итоги тренировки для конкретного спортсмена.
@@ -74,16 +74,16 @@ def calculate_current_workout_totals(
         return 0.0, 0
 
     # Получаем требования под текущий уровень спортсмена из справочника уровней
-    level_reqs = db_session.get(LevelExperience, skater.level)
+    level_reqs = await db_session.get(LevelExperience, skater.level)
     min_categories = level_reqs.min_trick_categories if level_reqs else 3
     max_logs_for_xp = level_reqs.max_workout_logs if level_reqs else 10
 
     # Собираем все уникальные категории, которые спортсмен УЖЕ сделал на этой тренировке
     # Для этого нам понадобятся ID трюков из логов
     trick_ids = [log.trick_id for log in trick_logs]
-    tricks_in_workout = db_session.scalars(
+    tricks_in_workout = (await db_session.scalars(
         select(Trick).where(Trick.id.in_(trick_ids))
-    ).all()
+    )).all()
     
     trick_id_to_category = {t.id: t.category for t in tricks_in_workout}
     unique_categories = {trick_id_to_category[log.trick_id] for log in trick_logs if log.trick_id in trick_id_to_category}
@@ -111,7 +111,7 @@ def calculate_current_workout_totals(
             missing_categories = min_categories - categories_count
             avg_points -= (missing_categories * 3.0)
             
-        final_sport_score = max(0.0, round(avg_points, 2))
+        final_sport_score = round(avg_points, 2)
     else:
         final_sport_score = 0.0
 
@@ -134,7 +134,7 @@ def calculate_current_workout_totals(
     return final_sport_score, total_xp
 
 
-def check_level_up(current_level: int, current_xp: int, db_session: Session) -> Tuple[int, bool]:
+async def check_level_up(current_level: int, current_xp: int, db_session) -> Tuple[int, bool]:
     """
     Проверяет, набрал ли игрок достаточно опыта для повышения уровня.
     Возвращает: (Новый уровень, Флаг апнулся ли уровень)
@@ -144,7 +144,7 @@ def check_level_up(current_level: int, current_xp: int, db_session: Session) -> 
     
     while True:
         # Ищем требования для СЛЕДУЮЩЕГО уровня
-        next_level_reqs = db_session.get(LevelExperience, new_level + 1)
+        next_level_reqs = await db_session.get(LevelExperience, new_level + 1)
         if not next_level_reqs:
             break # Достигнут максимальный уровень (например, 80)
             
