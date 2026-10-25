@@ -44,7 +44,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         await message.answer(
             f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{user.full_name}</b>!\n"
             "Все судейские связки и лимиты опыта активны. Выберите действие:",
-            reply_markup=get_coach_main_menu_dynamic(has_active_workout=active_w is not None)
+            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None)
         )
 
     # 3. Если вошел Спортсмен (Ученик)
@@ -93,7 +93,7 @@ async def process_select_coach(callback: CallbackQuery, state: FSMContext, sessi
     active_w = (await session.execute(
         select(Workout).where(Workout.status == "active")
     )).scalar_one_or_none()
-    await callback.message.answer("Выберите действие:", reply_markup=get_coach_main_menu_dynamic(has_active_workout=active_w is not None))
+    await callback.message.answer("Выберите действие:", reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None))
     await callback.answer()
 
 
