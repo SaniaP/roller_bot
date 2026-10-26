@@ -1,9 +1,11 @@
+import logging
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select,delete
+from sqlalchemy import select, delete
 
 from models import User, Workout
 from config import CHIEF_COACH_ID
@@ -11,31 +13,69 @@ from states import SkaterRegistrationStates
 
 # Импортируем клавиатуры 
 from keyboards import get_coach_main_menu, get_coach_main_menu_sync, get_skater_main_menu, get_role_selection_kb
+from keyboards.coach_kb import get_approve_user_kb
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
-    """Хэндлер команды /start. Проверяет авторизацию или предлагает выбрать роль."""
-    await state.clear()      #сброс FSM для текущего юзера
+    """Хэндлер команды /start. Проверяет авторизацию или регистрирует спортсмена."""
+    await state.clear()  # Сброс FSM для текущего юзера
     tg_id = message.from_user.id
     
-    # Проверяем, есть ли пользователь в базе данных
+    # 1. Проверяем, есть ли пользователь в базе данных
     query = select(User).where(User.telegram_id == tg_id)
     result = await session.execute(query)
     user = result.scalar_one_or_none()
 
-    # 1. Если пользователя нет в базе — отправляем выбирать роль
+    # ==========================================
+    # ЛОГИКА ДЛЯ АВТОРЕГИСТРАЦИИ НОВОГО СПОРТСМЕНА
+    # ==========================================
     if user is None:
-        await message.answer(
-            "👋 Привет! Добро пожаловать в RPG-систему роллер-школы!\n\n"
-            "Я не нашел тебя в списках. Давай создадим твой профиль персонажа.\n"
-            "Для начала выбери свою <b>роль в системе</b>:",
-            reply_markup=get_role_selection_kb()
-        )
-        return # обязательно нужен, что бы функция не пошла дальше
+        username = message.from_user.username
+        full_name = message.from_user.full_name
 
-    # 2. Если вошел Тренер
+        # Создаем профиль спортсмена в БД со статусом НЕОДОБРЕН
+        new_user = User(
+            telegram_id=tg_id,
+            username=username,
+            full_name=full_name,
+            role="student",
+            is_approved=False,
+            level=1  # Стартовый уровень в RPG-системе
+        )
+        session.add(new_user)
+        await session.commit()
+        
+        # Отправляем запрос тренеру на одобрение заявки
+        try:
+            await message.bot.send_message(
+                chat_id=CHIEF_COACH_ID,
+                text=f"🔔 **Новая заявка на регистрацию!**\n\n"
+                     f"Спортсмен: {full_name}\n"
+                     f"Username: @{username or 'нет'}\n"
+                     f"ID: `{tg_id}`\n\n"
+                     f"Разрешить ему доступ к тренировкам?",
+                reply_markup=get_approve_user_kb(tg_id),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление тренеру: {e}")
+
+        # Отвечаем новому спортсмену
+        await message.answer(
+            f"Привет, {full_name}! 👋\n"
+            f"Я бот для ведения тренировок по фристайл-слалому.\n\n"
+            f"⏳ Ваша заявка отправлена тренеру на одобрение. "
+            f"Как только тренер подтвердит профиль, вы сможете подключаться к тренировкам по PIN-коду!"
+        )
+        return
+
+    # ==========================================
+    # СТАРАЯ ЛОГИКА ТРЕНЕРА (ОСТАЛАСЬ БЕЗ ИЗМЕНЕНИЙ)
+    # ==========================================
     if user.role == "coach":
         # Проверяем, есть ли активная тренировка, чтобы показать кнопку «Продолжить»
         active_w = (await session.execute(
@@ -46,18 +86,29 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             "Все судейские связки и лимиты опыта активны. Выберите действие:",
             reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None)
         )
+        return
 
-    # 3. Если вошел Спортсмен (Ученик)
+    # ==========================================
+    # ЛОГИКА ДЛЯ СУЩЕСТВУЮЩИХ СПОРТСМЕНОВ
+    # ==========================================
     else:
-        await message.answer(
-            f"🛹 Привет, <b>{user.full_name}</b>!\n"
-            f"Твой текущий уровень: <b>{user.level}</b> лвл. Твои колеса готовы к тренировке!\n"
-            "Выбирай действие на панели управления:",
-            reply_markup=get_skater_main_menu()
-        )
+        # Если спортсмен еще не одобрен тренером
+        if not user.is_approved:
+            await message.answer(
+                f"⏳ Привет, <b>{user.full_name}</b>!\n\n"
+                f"Ваша заявка всё ещё находится на рассмотрении у тренера.\n"
+                f"Пожалуйста, дождитесь подтверждения."
+            )
+        # Если одобрен — открываем доступ к панели управления
+        else:
+            await message.answer(
+                f"🛹 Привет, <b>{user.full_name}</b>!\n"
+                f"Твой текущий уровень: <b>{user.level}</b> лвл. Твои колеса готовы к тренировке!\n"
+                "Выбирай действие на панели управления:",
+                reply_markup=get_skater_main_menu()
+            )
 
-#после выполнения /start, запустится одна из трех функций из трех функций,
-# которые в любом случае приведут нас к выбору роли. 
+
 
 @router.callback_query(F.data == "select_role_coach")
 async def process_select_coach(callback: CallbackQuery, state: FSMContext, session: AsyncSession):

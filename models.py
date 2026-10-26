@@ -68,7 +68,9 @@ class Workout(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    status: Mapped[str] = mapped_column(String(20), default="planned")
+    # Наш PIN, для самостоятельной работы
+    pin_code: Mapped[Optional[str]] = mapped_column(String(4), unique=True, nullable=True, default=None)  
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE")  # ACTIVE, FINISHED
 
 class WorkoutRegistration(Base):
     """Запись учеников на тренировку"""
@@ -97,3 +99,10 @@ class TrickLog(Base):
     execution_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
     calculated_points: Mapped[float] = mapped_column(Float)
     calculated_xp: Mapped[int] = mapped_column(Integer)
+
+# Таблица участников (кто к какой тренировке подключен)
+class WorkoutParticipant(Base):
+    __tablename__ = 'workout_participants'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workout_id: Mapped[int] = mapped_column(Integer, ForeignKey('workouts.id'))
+    student_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.telegram_id'))

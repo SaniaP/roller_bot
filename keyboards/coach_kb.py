@@ -133,3 +133,15 @@ def get_track_coeff_kb() -> InlineKeyboardMarkup:
     builder.button(text="120 см", callback_data="cone_120")
     builder.adjust(3)
     return builder.as_markup()
+
+
+def get_approve_user_kb(student_tg_id: int) -> InlineKeyboardMarkup:
+    """Кнопки для тренера, чтобы одобрить или отклонить заявку ученика"""
+    builder = InlineKeyboardBuilder()
+    
+    # В callback_data зашиваем ID студента, чтобы хэндлер знал, кого именно одобрять
+    builder.button(text="✅ Одобрить", callback_data=f"approve_user:{student_tg_id}")
+    builder.button(text="❌ Отклонить", callback_data=f"reject_user:{student_tg_id}")
+    
+    builder.adjust(2) # Располагаем кнопки в один ряд (две колонки)
+    return builder.as_markup()

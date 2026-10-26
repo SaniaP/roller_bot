@@ -1,5 +1,6 @@
 import logging
 import re
+import random
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -10,6 +11,7 @@ from sqlalchemy import select, delete
 
 from models import User, Workout, WorkoutRegistration, TrickLog, Trick
 from states.coach_states import CoachRegistrationStates, WorkoutCreationStates
+from states.workout_states import CoachWorkoutStates
 from keyboards.coach_kb import (
     get_coach_main_menu, get_coach_main_menu_sync, get_cancel_keyboard,
     get_active_workout_kb, get_skater_workout_card_kb,
@@ -94,8 +96,13 @@ async def coach_add_student_finish(message: Message, state: FSMContext, session:
 # 2. НОВАЯ ЛОГИКА ТРЕНИРОВКИ (ОБНОВЛЕННЫЙ ПУНКТ 1.1)
 # ==========================================
 
+def generate_workout_pin() -> str:
+    """Генерация уникального 4-значного PIN-кода"""
+    return str(random.randint(1000, 9999))
+
+
 @router.message(F.text.in_({"🏋️ Начать тренировку", "🏋️ Продолжить тренировку"}))
-async def coach_start_workout(message: Message, session: AsyncSession):
+async def coach_start_workout(message: Message, state: FSMContext, session: AsyncSession):
     """Открытие/продолжение тренировки. Если активная есть — открываем её меню"""
     query = select(Workout).where(Workout.status == "active")
     active_workout = (await session.execute(query)).scalar_one_or_none()
@@ -110,19 +117,38 @@ async def coach_start_workout(message: Message, session: AsyncSession):
             st = await session.get(User, r.student_id)
             if st: current_students.append(st)
 
+        # Выводим сообщение о продолжении тренировки и показываем сохраненный ранее пин-код
         await message.answer(
-            "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nСписок спортсменов на занятии:",
-            reply_markup=get_active_workout_kb(active_workout.id, current_students)
+            f"🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\n"
+            f"PIN-код для подключения учеников: `{active_workout.pin_code}`\n\n"
+            f"Список спортсменов на занятии:",
+            reply_markup=get_active_workout_kb(active_workout.id, current_students),
+            parse_mode="Markdown"
         )
         return
 
-    new_workout = Workout(date=datetime.now(), status="active")
+    # --- ЕСЛИ ТРЕНИРОВКИ НЕТ, СОЗДАЕМ НОВУЮ С PIN-КОДОМ ---
+    pin = generate_workout_pin()
+    
+    # Создаем тренировку в БД со статусом active и сгенерированным pin_code
+    new_workout = Workout(
+        date=datetime.now(), 
+        status="active",
+        pin_code=pin
+    )
     session.add(new_workout)
     await session.commit()
     
+    # Переводим тренера в состояние активности тренировки
+    await state.set_state(CoachWorkoutStates.training_active)
+    
     await message.answer(
-        "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nДобавьте спортсменов из БД, чтобы начать фиксацию результатов.",
-        reply_markup=get_active_workout_kb(new_workout.id, [])
+        f"🏋️‍♂️ **Тренировка открыта!**\n\n"
+        f"Сообщите ученикам этот PIN-код для подключения:\n"
+        f"👉 `{pin}` 👈 (нажмите, чтобы скопировать)\n\n"
+        f"Ученики будут появляться в вашем списке автоматически по мере ввода кода.",
+        reply_markup=get_active_workout_kb(new_workout.id, []),
+        parse_mode="Markdown"
     )
 
 # ==========================================
