@@ -9,12 +9,11 @@ from sqlalchemy import select, delete
 
 from models import User, Workout
 from config import CHIEF_COACH_ID
-from states import SkaterRegistrationStates
 
 # Импортируем клавиатуры 
-from keyboards import get_coach_main_menu, get_coach_main_menu_sync, get_skater_main_menu, get_role_selection_kb
+from keyboards import get_coach_main_menu_sync
 from keyboards.coach_kb import get_approve_user_kb
-
+from keyboards.skater_kb import get_student_main_menu
 logger = logging.getLogger(__name__)
 
 router = Router()
@@ -40,7 +39,6 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         # Создаем профиль спортсмена в БД со статусом НЕОДОБРЕН
         new_user = User(
             telegram_id=tg_id,
-            username=username,
             full_name=full_name,
             role="student",
             is_approved=False,
@@ -105,182 +103,149 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
                 f"🛹 Привет, <b>{user.full_name}</b>!\n"
                 f"Твой текущий уровень: <b>{user.level}</b> лвл. Твои колеса готовы к тренировке!\n"
                 "Выбирай действие на панели управления:",
-                reply_markup=get_skater_main_menu()
+                reply_markup=get_student_main_menu()
             )
 
+@router.callback_query(F.data.startswith("approve_user:"))
+async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
+    """Тренер одобряет заявку: юзер получает доступ к меню ученика"""
+    student_tg_id = int(callback.data.split(":")[1])
 
-
-@router.callback_query(F.data == "select_role_coach")
-async def process_select_coach(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    """Ловим нажатие кнопки 'Я Тренер' и проверяем права"""
-    tg_id = callback.from_user.id
-
-    # Валидация по CHIEF_COACH_ID из config.py
-    if tg_id != CHIEF_COACH_ID:
-        await callback.answer(
-            "⛔ Доступ запрещен! Вы не зарегистрированы в системе как Главный Тренер.", 
-            show_alert=True
-        )
-        return
-
-    # Если ID совпал, сразу регистрируем шефа (ФИО берем из аккаунта TG)
-    full_name = callback.from_user.full_name or "Главный Тренер"
-    
-    new_coach = User(
-        telegram_id=tg_id,
-        full_name=full_name,
-        role="coach",
-        is_approved=True            #нужно ли тут?
-    )
-    session.add(new_coach)
-
-    # commit выполнится автоматически благодаря нашей Middleware! session туда попадает и проверяется
-    
-    await callback.message.edit_text(
-        f"👑 Авторизация успешна!\nСоздан профиль Тренера: <b>{full_name}</b>.\n"
-        "Вам доступно управление тренировочным процессом.",
-    )
-    # Выводим главное меню тренера (с учётом активной тренировки)
-    active_w = (await session.execute(
-        select(Workout).where(Workout.status == "active")
+    user = (await session.execute(
+        select(User).where(User.telegram_id == student_tg_id)
     )).scalar_one_or_none()
-    await callback.message.answer("Выберите действие:", reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None))
-    await callback.answer()
 
+    if not user:
+        await callback.answer("❌ Пользователь не найден в базе (возможно, удалил профиль).", show_alert=True)
+        return
 
-@router.callback_query(F.data == "select_role_student")
-async def process_select_student(callback: CallbackQuery, state: FSMContext):
-    """Ловим нажатие кнопки 'Я Ученик' и запускаем цепочку FSM анкетирования"""
+    user.is_approved = True
+    await session.commit()
+
+    # Убираем кнопки и сообщаем тренеру
     await callback.message.edit_text(
-        "📝 Отлично! Начнем регистрацию ученика.\n\n"
-        "Пожалуйста, <b>введите свои Фамилию и Имя</b> через пробел (например: Иванов Иван):"
+        f"✅ Заявка <b>{user.full_name}</b> одобрена! Доступ к тренировкам открыт."
     )
-    await state.set_state(SkaterRegistrationStates.waiting_for_name)
-    await callback.answer()
+    await callback.answer("Заявка одобрена!")
 
-
-@router.message(SkaterRegistrationStates.waiting_for_name)
-async def process_reg_name(message: Message, state: FSMContext):
-    """Ловим ввод Имени и Фамилии спортсмена"""
-    full_name = message.text.strip()
-    
-    if len(full_name) < 3 or " " not in full_name:
-        await message.answer("⚠️ Пожалуйста, введите корректно Фамилию и Имя через пробел (например: Петров Петр):")
-        return
-
-    await state.update_data(full_name=full_name)
-    
-    await message.answer(
-        f"Отлично, <b>{full_name}</b>!\n"
-        "Теперь введите вашу <b>дату рождения</b> в формате <code>ДД.ММ.ГГГГ</code> (например: 12.04.2011):"
-    )
-    await state.set_state(SkaterRegistrationStates.waiting_for_birth_date)
-
-
-@router.message(SkaterRegistrationStates.waiting_for_birth_date)
-async def process_reg_birth_date(message: Message, state: FSMContext, session: AsyncSession):
-    """Ловим дату рождения и окончательно пишем роллера в базу"""
-    from datetime import datetime
-    date_text = message.text.strip()
-    
+    # Уведомляем ученика, что его одобрили
     try:
-        birth_date = datetime.strptime(date_text, "%d.%m.%Y").date()
-    except ValueError:
-        await message.answer("⚠️ Неверный формат даты. Напишите её как <code>ДД.ММ.ГГГГ</code> (например: 25.10.2014):")
-        return
+        await callback.bot.send_message(
+            chat_id=student_tg_id,
+            text=f"🎉 Отличные новости, <b>{user.full_name}</b>!\n"
+                 f"Тренер одобрил твою заявку! Теперь тебе доступно полное меню бота.",
+            reply_markup=get_student_main_menu()
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить ученика {student_tg_id} об одобрении: {e}")
 
-    user_data = await state.get_data()
-    full_name = user_data.get("full_name")
+
+@router.callback_query(F.data.startswith("reject_user:"))
+async def reject_user_handler(callback: CallbackQuery, session: AsyncSession):
+    """Тренер отклоняет заявку: юзер удаляется из базы"""
+    student_tg_id = int(callback.data.split(":")[1])
+
+    user = (await session.execute(
+        select(User).where(User.telegram_id == student_tg_id)
+    )).scalar_one_or_none()
+
+    if user:
+        full_name = user.full_name
+        await session.delete(user)
+        await session.commit()
+    else:
+        full_name = "неизвестный пользователь"
+
+    # Убираем кнопки и сообщаем тренеру
+    await callback.message.edit_text(
+        f"❌ Заявка <b>{full_name}</b> отклонена. Профиль удален из базы."
+    )
+    await callback.answer("Заявка отклонена.")
+
+    # Уведомляем ученика об отклонении
+    try:
+        await callback.bot.send_message(
+            chat_id=student_tg_id,
+            text=f"😔 К сожалению, тренер отклонил твою заявку.\n"
+                 f"Если это ошибка — свяжись с тренером и отправь /start заново."
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить ученика {student_tg_id} об отклонении: {e}")
+
+
+@router.message(Command("test_mode"))
+async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSession):
+    """Секретная команда для Главного Тренера: переключение между режимами Тренер/Ученик"""
     tg_id = message.from_user.id
 
-    new_user = User(
-        telegram_id=tg_id,
-        full_name=full_name,
-        birth_date=birth_date,
-        role="student",
-    )
+    # Жесткая проверка: пользоваться командой может ТОЛЬКО шеф
+    if tg_id != CHIEF_COACH_ID:
+        await message.answer("⛔ Ошибка доступа. Данная команда предназначена только для разработчика/главного тренера.")
+        return
 
-    session.add(new_user)
+    # Сбрасываем текущие состояния FSM, чтобы контексты тренировок не накладывались
     await state.clear()
 
-    await message.answer(
-        f"🎉 Ура! Регистрация завершена. Создан персонаж: <b>{full_name}</b>.\n"
-        f"Твой стартовый уровень: <b>1</b> [XP: 0/200].\n\n"
-        "Теперь ты можешь записываться на тренировки и вносить свои трюки!",
-        reply_markup=get_skater_main_menu()
-    )
+    # Ищем твой профиль в БД
+    query = select(User).where(User.telegram_id == tg_id)
+    user = (await session.execute(query)).scalar_one_or_none()
 
-
-@router.message(Command("set_student"))
-async def set_role_student(message: Message, session: AsyncSession):
-    """Секретная команда: принудительно делает тебя УЧЕНИКОМ в базе данных"""
-    # 1. Ищем твою запись в базе
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
-    
-    # 2. Если тебя вообще нет в базе (например, очистил БД), создаем профиль
     if not user:
-        user = User(
-            telegram_id=message.from_user.id,
-            full_name=message.from_user.full_name,
-            role="student",
-            is_approved=True  # Сразу одобряем себя
-        )
-        session.add(user)
-    else:
-        # Если ты был, просто меняем роль и одобряем
+        await message.answer("❌ Сначала зарегистрируйтесь в боте через команду /start")
+        return
+
+    # МЕНЯЕМ РОЛЬ НА ПРОТИВОПОЛОЖНУЮ
+    if user.role == "coach":
         user.role = "student"
-        user.is_approved = True
+        user.is_approved = True # Чтобы сразу иметь доступ к PIN-коду
+        await session.commit() 
         
-    await session.commit()
-    
-    await message.answer(
-        "🔄 **Роль успешно изменена на: СПОРТСМЕН (Ученик)**\n"
-        "Теперь тебе доступно игровое RPG-меню и внесение трюков!",
-        reply_markup=get_skater_main_menu(),
-        parse_mode="Markdown"
-    )
-
-@router.message(Command("set_coach"))
-async def set_role_coach(message: Message, session: AsyncSession):
-    """Секретная команда: принудительно делает тебя ТРЕНЕРОМ в базе данных"""
-    result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
-    user = result.scalar_one_or_none()
-    
-    if not user:
-        user = User(
-            telegram_id=message.from_user.id,
-            full_name=message.from_user.full_name,
-            role="coach",
-            is_approved=True
+        await message.answer(
+            f"🔄 **РЕЖИМ ТЕСТИРОВАНИЯ: УЧЕНИК** 🛹\n\n"
+            f"Твоя роль в базе временно изменена на `student`.\n"
+            f"Теперь ты можешь проверить ввод PIN-кода и отправку трюков.",
+            reply_markup=get_student_main_menu()
         )
-        session.add(user)
     else:
         user.role = "coach"
-        user.is_approved = True
+        await session.commit() 
         
-    await session.commit()
-    
-    # Сюда можно подставить твою клавиатуру тренера, если она есть
-    await message.answer(
-        "🔄 **Роль успешно изменена на: ТРЕНЕР**\n"
-        "Теперь ты можешь управлять тренировками и подтверждать трюки!",
-        # reply_markup=get_coach_main_menu(), # Раскомментируй, если кнопка готова
-        parse_mode="Markdown"
-    )
+        # Проверяем активную тренировку для правильного отображения меню тренера
+        active_w = (await session.execute(
+            select(Workout).where(Workout.status == "active")
+        )).scalar_one_or_none()
+        
+        await message.answer(
+            f"🔄 **РЕЖИМ ТЕСТИРОВАНИЯ: ТРЕНЕР** 👑\n\n"
+            f"Роль успешно возвращена на `coach`.\n"
+            f"Вам снова доступна панель управления процессом.",
+            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None)
+        )
 
-@router.message(Command("reset"))
-async def cmd_reset_profile(message: Message, state: FSMContext, session: AsyncSession):
-    """Секретная команда для сброса профиля (удаления из БД)"""
-    await state.clear()
+
+@router.message(Command("test_new_user"))
+async def simulate_new_user(message: Message, state: FSMContext, session: AsyncSession):
+    """Эмуляция НОВОГО пользователя: полностью стирает твой профиль из БД,
+    чтобы следующий /start прошел весь путь регистрации с нуля
+    (заявка тренеру -> одобрение -> доступ)."""
     tg_id = message.from_user.id
-    
-    # Стираем пользователя из базы данных по его Telegram ID
+
+    if tg_id != CHIEF_COACH_ID:
+        await message.answer("⛔ Ошибка доступа. Данная команда предназначена только для разработчика/главного тренера.")
+        return
+
+    # Сбрасываем FSM, чтобы не осталось контекста тренировок/регистраций
+    await state.clear()
+
+    # Удаляем профиль — теперь бот считает тебя абсолютно новым юзером
     query = delete(User).where(User.telegram_id == tg_id)
     await session.execute(query)
-    # commit выполнится автоматически вашей Middleware!
-    
+    await session.commit()
+
     await message.answer(
-        "🗑 <b>Ваш профиль успешно удален из базы данных!</b>\n"
-        "Теперь вы можете ввести /start, чтобы пройти регистрацию заново, как в самый первый раз."
+        "🧪 **РЕЖИМ ТЕСТИРОВАНИЯ: НОВЫЙ ПОЛЬЗОВАТЕЛЬ**\n\n"
+        "Твой профиль полностью удален из базы данных.\n"
+        "Теперь отправь /start — бот пройдет весь путь регистрации заново: "
+        "создаст новую заявку и отправит её тренеру на одобрение.",
+        parse_mode="Markdown"
     )

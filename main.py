@@ -14,7 +14,7 @@ from middlewares.db_middleware import DbSessionMiddleware
 # ИМПОРТИРУЕМ НАШ РОУТЕР и роутер тренера
 from handlers.common import router as common_router  
 from handlers.coach import router as coach_router
-from handlers.student import student_router
+from handlers.student import router as student_router
 
 # Добавили импорт движка и базы моделей
 from database import engine, Base 
@@ -57,10 +57,11 @@ async def main():
     # РЕГИСТРИРУЕМ РОУТЕР
     # Передаем диспетчеру списки хэндлеров, чтобы он знал, как реагировать 
     # на команды, сообщения и кнопки пользователей.
-    dp.include_router(common_router)
-    #тоже для тренера и спротсмена
+
+  
     dp.include_router(coach_router)
     dp.include_router(student_router)
+    dp.include_router(common_router)
     # Сообщение в консоль о старте
     print("🚀 Бот роллер-школы успешно запущен и готов к работе!")
 

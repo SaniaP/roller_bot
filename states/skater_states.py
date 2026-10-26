@@ -11,3 +11,8 @@ class SkaterWorkoutStates(StatesGroup):
     waiting_for_quantity = State()   # Ввод количества конусов/повторений
     waiting_for_track_coeff = State()# Выбор шага дорожки (50см, 80см, 120см) [2.2]
     waiting_for_combo = State()      # Отметка: "Это элемент комбо-связки?" [2.2]
+
+# в гугле это файл states/student_states.py
+class StudentStates(StatesGroup):
+    waiting_for_pin = State()     # Ожидание ввода 4-значного PIN-кода
+    training_active = State()     # Находится внутри активной тренировки
