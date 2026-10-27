@@ -19,3 +19,4 @@ class WorkoutVerificationStates(StatesGroup):
     waiting_for_workout_select = State() # Тренер выбирает тренировку из списка ожидания
     waiting_for_log_edit = State()       # Тренер выбирает конкретный трюк ученика для правки
     waiting_for_new_value = State()      # Тренер меняет количество или "стоимость" (базовый XP/баллы) трюка
+    waiting_for_multiplier = State()     # Тренер вводит поправку исполнения в % (-10 / 10) для подтверждения трюка

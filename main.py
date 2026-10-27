@@ -35,6 +35,23 @@ async def main():
     async with engine.begin() as conn:
         # Эта команда посмотрит на все модели из models.py и создаст таблицы, если их нет
         await conn.run_sync(Base.metadata.create_all)
+
+        # Легкая миграция: SQLite не достраивает колонки существующих таблиц через create_all,
+        # поэтому новые колонки моделей (например, trick_logs.needs_review) добавляем вручную
+        import sqlite3
+        from models import TrickLog
+
+        db_path = str(engine.url).split("///")[-1]  # sqlite+aiosqlite:///roller_school.db -> roller_school.db
+        sync_conn = sqlite3.connect(db_path)
+        existing_cols = {row[1] for row in sync_conn.execute("PRAGMA table_info(trick_logs)")}
+        if existing_cols:
+            model_cols = {c.name for c in TrickLog.__table__.columns}
+            for col in model_cols - existing_cols:
+                col_type = "INTEGER" if col == "needs_review" else "REAL"
+                sync_conn.execute(f"ALTER TABLE trick_logs ADD COLUMN {col} {col_type} DEFAULT 0")
+                print(f"   ➕ Добавлена колонка trick_logs.{col}")
+        sync_conn.commit()
+        sync_conn.close()
     print("✅ Структура базы данных успешно синхронизирована!")
 
 

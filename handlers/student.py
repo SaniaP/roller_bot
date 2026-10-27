@@ -253,40 +253,25 @@ async def student_save_final_trick(message: Message, state: FSMContext, session:
         quantity=cones_count,
         execution_multiplier=execution_multiplier,
         calculated_points=points_earned,
-        calculated_xp=xp_earned
+        calculated_xp=xp_earned,
+        needs_review=True  # Трюк отправлен самостоятельно, ждем подтверждения тренера
     )
     session.add(new_trick_log)
 
-    # 2. ОБНОВЛЕНИЕ ОЧКОВ ТЕКУЩЕЙ СЕССИИ В workout_registrations
-    reg_query = select(WorkoutRegistration).where(
-        WorkoutRegistration.workout_id == workout_id,
-        WorkoutRegistration.student_id == user.id
-    )
-    registration = (await session.execute(reg_query)).scalar_one_or_none()
-    
-    if registration:
-        registration.training_points += points_earned
-        registration.training_xp += xp_earned
-
-    # 3. ОБНОВЛЕНИЕ RPG-ПРОГРЕССА В ТАБЛИЦЕ USERS
-    user.xp += xp_earned
-    
-    # Предполагается, что общие очки спорта в модели User называются sports_scores или аналогично
-    if hasattr(user, 'sports_scores'):
-        user.sports_scores += points_earned
-
+    # НЕ начисляем очки сразу: результаты засчитаются только после
+    # подтверждения тренером (секция проверки needs_review в coach.py)
     await session.commit()
 
     # Возвращаем FSM в режим активного ожидания следующего трюка
     await state.set_state(StudentStates.training_active)
     
     await message.answer(
-        f"✨ Трюк успешно записан!\n\n"
+        f"✨ Трюк отправлен на проверку тренеру!\n\n"
         f"🛹 Трюк: {trick.name}\n"
         f"📏 Дорожка: {distance} см\n"
         f"🪚 Пройдено конусов: {cones_count} шт.\n"
-        f"🎯 Исполнение: 1.0 (Чисто)\n"
-        f"📈 Начислено: +{xp_earned} XP | +{points_earned} PTS",
+        f"🎯 Исполнение: 1.0 (Чисто)\n\n"
+        f"⏳ Очки и XP засчитаются после подтверждения тренером.",
         reply_markup=get_student_training_menu(),
         parse_mode="Markdown"
     )

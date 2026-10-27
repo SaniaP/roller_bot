@@ -23,6 +23,12 @@ class HandbookAction(CallbackData, prefix="hb"):
     category: Optional[str] = None
     trick_id: Optional[int] = None
 
+class ReviewAction(CallbackData, prefix="rev"):
+    action: str        # "rv_student" (карточка ученика), "rv_confirm_log", "rv_confirm_all_student", "rv_confirm_all", "rv_back"
+    workout_id: int
+    student_id: Optional[int] = None
+    log_id: Optional[int] = None
+
 # --- Старые реплай-клавиатуры ---
 def get_coach_main_menu() -> ReplyKeyboardMarkup:
     """Главное меню для роли Тренера (статичная версия: всегда "Начать тренировку")"""
@@ -132,6 +138,45 @@ def get_track_coeff_kb() -> InlineKeyboardMarkup:
     builder.button(text="80 см", callback_data="cone_80")
     builder.button(text="120 см", callback_data="cone_120")
     builder.adjust(3)
+    return builder.as_markup()
+
+
+def get_review_students_kb(workout_id: int, students: list[User]) -> InlineKeyboardMarkup:
+    """Экран проверки: список самостоятельных спортсменов, ждущих подтверждения"""
+    builder = InlineKeyboardBuilder()
+    for st in students:
+        builder.button(
+            text=f"🧍 {st.full_name}",
+            callback_data=ReviewAction(action="rv_student", workout_id=workout_id, student_id=st.id)
+        )
+    builder.button(
+        text="✅ Подтвердить всех",
+        callback_data=ReviewAction(action="rv_confirm_all", workout_id=workout_id)
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_review_student_card_kb(workout_id: int, student_id: int, logs: list[TrickLog], tricks: dict[int, "Trick"]) -> InlineKeyboardMarkup:
+    """Карточка самостоятельного ученика: список его неподтвержденных трюков.
+    Нажатие на трюк открывает ввод поправки исполнения (execution_multiplier)"""
+    builder = InlineKeyboardBuilder()
+    for log in logs:
+        trick = tricks.get(log.trick_id)
+        trick_name = trick.name if trick else "Трюк"
+        builder.button(
+            text=f"🎯 {trick_name} ({log.cone_line} см, {log.quantity} кон.)",
+            callback_data=ReviewAction(action="rv_edit_log", workout_id=workout_id, student_id=student_id, log_id=log.id)
+        )
+    builder.button(
+        text="✅ Подтвердить все трюки",
+        callback_data=ReviewAction(action="rv_confirm_all_student", workout_id=workout_id, student_id=student_id)
+    )
+    builder.button(
+        text="⬅️ К списку учеников",
+        callback_data=ReviewAction(action="rv_back", workout_id=workout_id)
+    )
+    builder.adjust(1)
     return builder.as_markup()
 
 

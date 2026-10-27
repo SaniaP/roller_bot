@@ -99,6 +99,8 @@ class TrickLog(Base):
     execution_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
     calculated_points: Mapped[float] = mapped_column(Float)
     calculated_xp: Mapped[int] = mapped_column(Integer)
+    # Флаг: трюк отправлен учеником самостоятельно с устройства и ждет подтверждения тренера
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
 
 # Таблица участников (кто к какой тренировке подключен)
 class WorkoutParticipant(Base):
