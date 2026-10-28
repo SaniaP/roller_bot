@@ -13,7 +13,7 @@ from models import User, Workout, WorkoutRegistration, TrickLog, Trick
 from states.coach_states import CoachRegistrationStates, WorkoutCreationStates, WorkoutVerificationStates
 from states.workout_states import CoachWorkoutStates
 from keyboards.coach_kb import (
-    get_coach_main_menu, get_coach_main_menu_sync, get_cancel_keyboard,
+    get_coach_main_menu_sync, get_cancel_keyboard,
     get_active_workout_kb, get_skater_workout_card_kb,
     get_categories_kb, get_tricks_by_cat_kb, get_track_coeff_kb,
     get_review_students_kb, get_review_student_card_kb,
@@ -41,14 +41,6 @@ async def cmd_cancel(message: Message, state: FSMContext, session: AsyncSession)
     await state.clear()
     await message.answer("❌ Действие отменено. Возвращаю вас в главное меню.", reply_markup=await get_coach_menu_for(session))
 
-# Перехватываем старый роутинг из меню выбора ролей (если он прилетает строкой)
-@router.callback_query(F.data == "select_role_coach")
-async def process_select_role_coach(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    await callback.message.edit_text(
-        text="🔑 Вы вошли в панель тренера. Используйте нижнее меню бота для управления.",
-        reply_markup=None
-    )
-    await callback.message.answer("Главное меню тренера загружено:", reply_markup=await get_coach_menu_for(session))
 
 # ==========================================
 # 1. РУЧНОЕ ДОБАВЛЕНИЕ УЧЕНИКА ТРЕНЕРОМ (ОСТАВЛЯЕМ КАК ЕСТЬ)
@@ -94,7 +86,7 @@ async def coach_add_student_finish(message: Message, state: FSMContext, session:
     await message.answer(f"🎉 Профиль ученика успешно создан!", reply_markup=await get_coach_menu_for(session))
 
 # ==========================================
-# 2. НОВАЯ ЛОГИКА ТРЕНИРОВКИ (ОБНОВЛЕННЫЙ ПУНКТ 1.1)
+# 1. ЛОГИКА ТРЕНИРОВКИ 
 # ==========================================
 
 def generate_workout_pin() -> str:

@@ -1,4 +1,3 @@
 from .coach_states import CoachRegistrationStates, WorkoutCreationStates, WorkoutVerificationStates
 from .skater_states import SkaterRegistrationStates, SkaterWorkoutStates
-#тут потом проверить skater_states и workout_states
 from .workout_states import StudentWorkoutStates,CoachWorkoutStates
