@@ -29,10 +29,6 @@ class ReviewAction(CallbackData, prefix="rev"):
     student_id: Optional[int] = None
     log_id: Optional[int] = None
 
-# --- Старые реплай-клавиатуры ! УДАЛИТЬ???---
-def get_coach_main_menu() -> ReplyKeyboardMarkup:
-    """Главное меню для роли Тренера (статичная версия: всегда "Начать тренировку")"""
-    return get_coach_main_menu_sync(has_active_workout=False)
 
 
 def get_coach_main_menu_sync(has_active_workout: bool) -> ReplyKeyboardMarkup:
