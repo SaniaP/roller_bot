@@ -101,7 +101,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         else:
             await message.answer(
                 f"🛹 Привет, <b>{user.full_name}</b>!\n"
-                f"Твой текущий уровень: <b>{user.level}</b> лвл. Твои колеса готовы к тренировке!\n"
+                f"Твой текущий уровень: <b>{user.level}</b> лвл. Ты готов прокачаться?!\n"
                 "Выбирай действие на панели управления:",
                 reply_markup=get_student_main_menu()
             )

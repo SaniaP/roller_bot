@@ -11,42 +11,11 @@ from sqlalchemy import select, distinct
 from models import User, Workout, WorkoutRegistration, Trick, TrickLog
 #как мы считаем если их не используем?)
 from calculator import calculate_single_trick, calculate_current_workout_totals, check_level_up
-from keyboards.skater_kb import get_student_main_menu
+from keyboards.skater_kb import get_student_main_menu,get_student_training_menu,get_distance_inline_kb
+from states import StudentStates
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-# =====================================================================
-# СОСТОЯНИЯ FSM ДЛЯ УЧЕНИКА
-# =====================================================================
-class StudentStates(StatesGroup):
-    waiting_for_pin = State()        # Ожидание ввода PIN-кода для входа
-    training_active = State()        # Находится на тренировке (главный экран сессии)
-    waiting_for_distance = State()   # Ожидание выбора дорожки (50, 80, 120)
-    waiting_for_cones = State()      # Ожидание ввода количества конусов
-
-
-# Текстовое меню внутри тренировки
-def get_student_training_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🛹 Отправить выполненный трюк")],
-            [KeyboardButton(text="📊 Мои очки за сегодня")],
-            [KeyboardButton(text="🚪 Покинуть тренировку")]
-        ],
-        resize_keyboard=True
-    )
-
-# Клавиатура выбора дорожки слалома
-def get_distance_inline_kb() -> types.InlineKeyboardMarkup:
-    buttons = [
-        [
-            types.InlineKeyboardButton(text="📏 50 см", callback_data="dist:50"),
-            types.InlineKeyboardButton(text="📏 80 см", callback_data="dist:80"),
-            types.InlineKeyboardButton(text="📏 120 см", callback_data="dist:120")
-        ]
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # =====================================================================

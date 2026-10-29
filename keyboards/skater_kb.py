@@ -1,5 +1,6 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from models import Trick
+from aiogram import types
+
 
 # =====================================================================
 # 1. ТЕКСТОВЫЕ КЛАВИАТУРЫ (REPLY)
@@ -27,6 +28,16 @@ def get_student_training_menu() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+# Клавиатура выбора дорожки слалома
+def get_distance_inline_kb() -> types.InlineKeyboardMarkup:
+    buttons = [
+        [
+            types.InlineKeyboardButton(text="📏 50 см", callback_data="dist:50"),
+            types.InlineKeyboardButton(text="📏 80 см", callback_data="dist:80"),
+            types.InlineKeyboardButton(text="📏 120 см", callback_data="dist:120")
+        ]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # =====================================================================
 # 2. ИНТЕРАКТИВНЫЕ КЛАВИАТУРЫ (INLINE)

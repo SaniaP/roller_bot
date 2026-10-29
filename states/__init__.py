@@ -1,3 +1,3 @@
 from .coach_states import CoachRegistrationStates, WorkoutCreationStates, WorkoutVerificationStates
-from .skater_states import SkaterRegistrationStates, SkaterWorkoutStates
+from .skater_states import SkaterRegistrationStates, SkaterWorkoutStates,StudentStates
 from .workout_states import StudentWorkoutStates,CoachWorkoutStates
