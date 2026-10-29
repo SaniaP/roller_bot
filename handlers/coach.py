@@ -144,9 +144,13 @@ async def coach_start_workout(message: Message, state: FSMContext, session: Asyn
         parse_mode="Markdown"
     )
 
+
+
 # ==========================================
-# 2. СПРАВОЧНИК ТРЮКОВ (ТОЛЬКО ПРОСМОТР)
+# 2. СПРАВОЧНИК ТРЮКОВ  И СТАТИСТИКА (ТОЛЬКО ПРОСМОТР)
 # ==========================================
+
+
 
 @router.message(F.text == "📚 Справочник трюков")
 async def show_tricks_handbook(message: Message, session: AsyncSession):
@@ -321,6 +325,17 @@ async def show_skater_card_or_main_list(callback: CallbackQuery, callback_data: 
     
     await callback.message.edit_text(text=card_text, reply_markup=get_skater_workout_card_kb(workout_id, student_id, list(logs)))
 
+
+@router.message(F.text == "📊 Статистика")
+async def coach_stats_placeholder(message: Message, session: AsyncSession):
+    """Заглушка под будущую статистику"""
+    await message.answer(
+        "📊 <b>Статистика</b> — раздел в разработке. Скоро здесь появятся итоги тренировок и прогресс учеников.",
+        reply_markup=await get_coach_menu_for(session),
+        parse_mode="HTML"
+    )
+
+
 # ==========================================
 # 3. ПОШАГОВЫЙ ИНЛАЙН-ВВОД ТРЮКОВ ТРЕНЕРОМ
 # ==========================================
@@ -447,9 +462,14 @@ async def process_fsm_quantity_and_save(message: Message, state: FSMContext, ses
     # Генерируем кнопку возврата
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="🔄 Вернуться в карточку спортсмена", 
+        text="⬅️ Карточка спортсмен", 
         callback_data=WorkoutAction(action="select_skater", workout_id=workout_id, student_id=student_id)
     )
+    builder.button(
+        text="➕ Добавить трюк", 
+        callback_data=TrickAction(action="choose_cat",workout_id=workout_id,student_id=student_id)
+    )
+
     
     # Формируем красивый отчет о добавлении
     accuracy_text = f"{percentage_mod}%" if percentage_mod else "без изменений"
@@ -534,35 +554,30 @@ async def _send_review_list(target: Message, session: AsyncSession, workout_id: 
         await target.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(F.text == "🔔 Проверить тренировки учеников")
-async def coach_review_workouts(message: Message, session: AsyncSession):
-    """Вход в меню проверки самостоятельных трюков"""
-    workout = (await session.execute(
-        select(Workout).where(Workout.status == "active")
-    )).scalar_one_or_none()
+@router.callback_query(WorkoutAction.filter(F.action == "review_workout"))
+async def coach_review_workouts(callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession):
+    """Вход в меню проверки самостоятельных трюков (кнопка в меню активной тренировки)"""
+    workout_id = callback_data.workout_id
 
-    if not workout:
-        await message.answer("❌ Сейчас нет активной тренировки.", reply_markup=await get_coach_menu_for(session))
-        return
-
-    grouped = await _get_pending_review(session, workout.id)
+    grouped = await _get_pending_review(session, workout_id)
     if not grouped:
-        await message.answer(
-            "✅ Новых самостоятельных трюков для подтверждения нет.",
-            reply_markup=await get_coach_menu_for(session)
-        )
+        await callback.answer("✅ Новых самостоятельных трюков для подтверждения нет.", show_alert=True)
         return
 
     students = [await session.get(User, sid) for sid in grouped]
     students = [s for s in students if s]
 
-    await message.answer(
+    await callback.message.edit_text(
         "🔔 <b>Проверка тренировок</b>\n\n"
         "Спортсмены, отправившие трюки самостоятельно и ждущие подтверждения:\n"
         "Нажмите на имя, чтобы проверить трюки по одному, либо подтвердите всех сразу.",
-        reply_markup=get_review_students_kb(workout.id, students),
+        reply_markup=get_review_students_kb(workout_id, students),
         parse_mode="HTML"
     )
+    await callback.answer()
+
+
+
 
 
 @router.callback_query(ReviewAction.filter(F.action == "rv_back"))

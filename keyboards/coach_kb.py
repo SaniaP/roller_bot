@@ -40,7 +40,7 @@ def get_coach_main_menu_sync(has_active_workout: bool) -> ReplyKeyboardMarkup:
         KeyboardButton(text="👤 Добавить ученика"),
         KeyboardButton(text="📚 Справочник трюков")
     )
-    builder.row(KeyboardButton(text="🔔 Проверить тренировки учеников"))
+    builder.row(KeyboardButton(text="📊 Статистика"))
     return builder.as_markup(resize_keyboard=True)
 
 def get_cancel_keyboard() -> ReplyKeyboardMarkup:
@@ -50,6 +50,7 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True)
 
 # --- Новые Инлайн-клавиатуры для ведения тренировки тренером ---
+REVIEW_BTN_TEXT = "🔔 Проверить тренировки учеников"
 def get_active_workout_kb(workout_id: int, current_students: list[User]) -> InlineKeyboardMarkup:
     """Экран: Идет тренировка. Позволяет добавлять учеников и переходить в их карточки"""
     builder = InlineKeyboardBuilder()
@@ -67,6 +68,10 @@ def get_active_workout_kb(workout_id: int, current_students: list[User]) -> Inli
             callback_data=WorkoutAction(action="select_skater", workout_id=workout_id, student_id=student.id)
         )
         
+    builder.button(
+        text="🔔 Проверить тренировки учеников",
+        callback_data=WorkoutAction(action="review_workout", workout_id=workout_id)
+    )
     builder.button(
         text="🏁 Завершить тренировку и посчитать итоги", 
         callback_data=WorkoutAction(action="finish_workout", workout_id=workout_id)
