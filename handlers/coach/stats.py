@@ -12,11 +12,30 @@ from handlers.coach.helpers import get_coach_menu_for, draw_progress_bar
 
 router = Router()
 
+TELEGRAM_TEXT_LIMIT = 4000  # запас ниже официального лимита 4096
+
+
+def fit_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    """Обрезает текст до лимита Telegram по границе строк.
+    Проблема: профиль ученика со всеми тренировками может превысить
+    лимит сообщения (4096 симв.) и упасть с 'message is too long'.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    # Режем по последнему переводу строки, чтобы не разорвать запись
+    nl = cut.rfind("\n")
+    if nl > 0:
+        cut = cut[:nl]
+    return cut + "\n… (показаны не все записи)"
+
 
 # --- Фабрика callback-данных статистики ---
 class StatsAction(CallbackData, prefix="stat"):
-    action: str  # "stats_student" — профиль ученика, "stats_back" — назад к списку
+    action: str  # "stats_student" — профиль ученика, "stats_back" — назад к списку,
+    # "stats_workout" — детальная разбивка одной тренировки
     student_id: int = 0
+    workout_id: int = 0
 
 
 def _students_kb(students: list[User]) -> InlineKeyboardMarkup:
@@ -38,7 +57,7 @@ async def coach_stats(message: Message, session: AsyncSession):
         (
             await session.execute(
                 select(User)
-                .where(User.role == "student")
+                # .where(User.role == "student") временно убрал
                 .order_by(User.level.desc(), User.xp.desc())
             )
         )
@@ -135,6 +154,111 @@ async def _progress_line(student: User, session: AsyncSession) -> str:
     return f"{header}\n{draw_progress_bar(percent)}"
 
 
+def build_workout_log_text(
+    workout: Workout,
+    reg: WorkoutRegistration,
+    student: User,
+    logs: list[tuple[TrickLog, Trick]],
+    level_reqs: LevelExperience | None,
+) -> str:
+    """Детальная разбивка одной тренировки: шапка + трюки с зачетом и штрафами."""
+    date_str = workout.date.strftime("%d.%m.%Y %H:%M") if workout.date else "—"
+    parts = [
+        f"🛹 <b>Тренировка №{workout.id}</b> от {date_str} ({workout.status})",
+        f"Итог: 🏅 {reg.training_points:.1f} очков | ✨ +{reg.training_xp} XP",
+    ]
+
+    if not logs:
+        parts.append("Трюки не записаны.")
+        return "\n".join(parts)
+
+    # Определяем, какие трюки не попали в зачет (правила калькулятора)
+    notes, penalties = _workout_breakdown(logs, level_reqs)
+    if penalties:
+        parts.extend(f"<i>{p}</i>" for p in penalties)
+
+    for log, trick in logs:
+        mult_note = ""
+        if log.execution_multiplier and log.execution_multiplier != 1.0:
+            mult_note = f" (качество ×{log.execution_multiplier:.2f})"
+        line = (
+            f" • {trick.name}: {log.quantity} кон. (дорожка {log.cone_line}){mult_note} — "
+            f"{log.calculated_points:.1f} очк., +{log.calculated_xp} XP"
+        )
+        note = notes.get(log.id)
+        if note == "out":
+            # Полностью вне зачета (и спорт, и игра) — серым/зачеркнутым
+            line = f"<s><i>{line}</i></s> 🚫 не в зачет"
+        elif note == "sport":
+            line += " 🚫 не в зачет спорта"
+        elif note == "game":
+            line += " 🚫 не в зачет XP"
+        parts.append(line)
+
+    return fit_telegram_text("\n".join(parts))
+
+
+def _workout_breakdown(
+    pairs: list[tuple[TrickLog, Trick]], level_reqs: LevelExperience | None
+) -> tuple[dict[int, str], list[str]]:
+    """Разбивка логов тренировки по правилам калькулятора.
+
+    - Спортивный режим: в зачет идут 8 лучших трюков по calculated_points.
+    - Игровой режим: в зачет идут не более max_workout_logs лучших трюков по calculated_xp.
+
+    Возвращает:
+        (log_notes, penalties) — где log_notes: {log_id: "добавка к строке"},
+        penalties: список текстов штрафов для вывода в разбивке.
+    """
+    max_logs = level_reqs.max_workout_logs if level_reqs else 10
+    min_categories = level_reqs.min_trick_categories if level_reqs else 3
+
+    # Зачет спорта: топ-8 по очкам
+    top8_ids = {
+        log.id
+        for log, _ in sorted(pairs, key=lambda p: p[0].calculated_points, reverse=True)[
+            :8
+        ]
+    }
+    # Зачет игры: топ max_workout_logs по XP
+    top_xp_ids = {
+        log.id
+        for log, _ in sorted(pairs, key=lambda p: p[0].calculated_xp, reverse=True)[
+            :max_logs
+        ]
+    }
+
+    notes: dict[int, str] = {}
+    for log, _trick in pairs:
+        in_sport = log.id in top8_ids
+        in_game = log.id in top_xp_ids
+        if not in_sport and not in_game:
+            notes[log.id] = "out"  # полностью вне зачета
+        elif not in_sport:
+            notes[log.id] = "sport"  # не в зачете спорта, но в зачете игры
+        elif not in_game:
+            notes[log.id] = "game"  # не в зачете игры, но в зачете спорта
+
+    penalties: list[str] = []
+    if pairs:
+        categories_count = len({trick.category for _log, trick in pairs})
+        if len(top8_ids) < 8:
+            missing_tricks = 8 - len(top8_ids)
+            penalties.append(
+                f"⚠️ Штраф за недобор трюков: -{missing_tricks * 3.0:.1f} очков ({missing_tricks} × 3.0)"
+            )
+        if categories_count < min_categories:
+            missing_categories = min_categories - categories_count
+            penalties.append(
+                f"⚠️ Штраф за недобор категорий: -{missing_categories * 3.0:.1f} очков ({missing_categories} × 3.0)"
+            )
+            penalties.append(
+                f"⚠️ Штраф за недобор категорий: -{missing_categories * 10}% XP ({missing_categories} × 10%)"
+            )
+
+    return notes, penalties
+
+
 async def build_student_profile_text(student: User, session: AsyncSession) -> str:
     """Полный текст профиля ученика: шапка с BP и баром + разбивка по тренировкам.
     Используется и тренерской статистикой, и кнопкой «Мой профиль» у ученика"""
@@ -156,7 +280,7 @@ async def build_student_profile_text(student: User, session: AsyncSession) -> st
         parts.append("Тренировок пока не было.")
         return "\n".join(parts)
 
-    parts.append("📊 <b>Разбивка по тренировкам:</b>")
+    parts.append("\n<b>Мои тренировки</b> (подробности — по кнопке 🔎):")
 
     for reg, workout in regs:
         date_str = workout.date.strftime("%d.%m.%Y") if workout.date else "—"
@@ -164,60 +288,131 @@ async def build_student_profile_text(student: User, session: AsyncSession) -> st
         # Если после этой тренировки у ученика вырос уровень — фиксируем это в разбивке
         if workout.status == "closed" and reg.training_xp:
             lvl_up_note = (
-                "\n🔥 Уровень повышен на этой тренировке!"
+                " 🔥"
                 if await _workout_caused_level_up(
                     session, student, workout.id, reg.training_xp
                 )
                 else ""
             )
         parts.append(
-            f"\n🏋️ <b>Тренировка от {date_str}</b> "
-            f"(№{workout.id}, {workout.status})\n"
-            f"Итог: 🏅 {reg.training_points:.1f} очков | ✨ +{reg.training_xp} XP{lvl_up_note}"
+            f" • {date_str} (№{workout.id}, {workout.status}) — "
+            f"🏅 {reg.training_points:.1f} очк., +{reg.training_xp} XP{lvl_up_note}"
         )
 
-        logs = (
-            await session.execute(
-                select(TrickLog, Trick)
-                .join(Trick, Trick.id == TrickLog.trick_id)
-                .where(
-                    TrickLog.workout_id == workout.id,
-                    TrickLog.student_id == student.id,
-                )
-                .order_by(TrickLog.id)
-            )
-        ).all()
+    return fit_telegram_text("\n".join(parts))
 
-        if not logs:
-            parts.append("Трюки не записаны.")
-        else:
-            for log, trick in logs:
-                mult_note = ""
-                if log.execution_multiplier and log.execution_multiplier != 1.0:
-                    mult_note = f" (качество ×{log.execution_multiplier:.2f})"
-                parts.append(
-                    f" • {trick.name}: {log.quantity} кон. (дорожка {log.cone_line}){mult_note} — "
-                    f"{log.calculated_points:.1f} очк., +{log.calculated_xp} XP"
-                )
 
-    return "\n".join(parts)
+async def get_student_workout_ids(
+    student: User, session: AsyncSession
+) -> list[tuple[int, Workout]]:
+    """ID тренировок ученика (свежие сверху) для инлайн-кнопок деталей."""
+    regs = (
+        await session.execute(
+            select(WorkoutRegistration, Workout)
+            .join(Workout, Workout.id == WorkoutRegistration.workout_id)
+            .where(WorkoutRegistration.student_id == student.id)
+            .order_by(Workout.date.desc())
+        )
+    ).all()
+    return [(reg.workout_id, workout) for reg, workout in regs]
+
+
+async def _workout_details_kb(
+    student: User, session: AsyncSession
+) -> InlineKeyboardMarkup:
+    """Инлайн-кнопки: детальная разбивка по каждой тренировке ученика + кнопка назад.
+    «К списку учеников» — только тренеру (у ученика этот список недоступен)."""
+    builder = InlineKeyboardBuilder()
+    for workout_id, workout in await get_student_workout_ids(student, session):
+        date_str = workout.date.strftime("%d.%m.%Y") if workout.date else "—"
+        builder.button(
+            text=f"🔎 Тренировка №{workout.id} ({date_str})",
+            callback_data=StatsAction(
+                action="stats_workout",
+                student_id=student.id,
+                workout_id=workout_id,
+            ),
+        )
+    if student.role == "coach":
+        builder.button(
+            text="⬅️ К списку учеников",
+            callback_data=StatsAction(action="stats_back"),
+        )
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 @router.callback_query(StatsAction.filter(F.action == "stats_student"))
 async def stats_student_profile(
     callback: CallbackQuery, callback_data: StatsAction, session: AsyncSession
 ):
-    """Профиль ученика: разбивка по каждой тренировке (трюки, очки, опыт)"""
+    """Профиль ученика: краткие итоги тренировок + кнопки деталей"""
     student = await session.get(User, callback_data.student_id)
     if not student:
         await callback.answer("Ученик не найден", show_alert=True)
         return
 
     text = await build_student_profile_text(student, session)
+    await callback.message.edit_text(
+        text,
+        reply_markup=await _workout_details_kb(student, session),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(StatsAction.filter(F.action == "stats_workout"))
+async def stats_workout_details(
+    callback: CallbackQuery, callback_data: StatsAction, session: AsyncSession
+):
+    """Детальная разбивка одной тренировки: трюки, зачет, штрафы"""
+    student = await session.get(User, callback_data.student_id)
+    workout = await session.get(Workout, callback_data.workout_id)
+    if not student or not workout:
+        await callback.answer("Данные не найдены", show_alert=True)
+        return
+
+    reg = (
+        await session.execute(
+            select(WorkoutRegistration).where(
+                WorkoutRegistration.workout_id == workout.id,
+                WorkoutRegistration.student_id == student.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not reg:
+        await callback.answer("Регистрация не найдена", show_alert=True)
+        return
+
+    logs = (
+        await session.execute(
+            select(TrickLog, Trick)
+            .join(Trick, Trick.id == TrickLog.trick_id)
+            .where(
+                TrickLog.workout_id == workout.id,
+                TrickLog.student_id == student.id,
+            )
+            .order_by(TrickLog.id)
+        )
+    ).all()
+
+    level_reqs = await session.get(LevelExperience, student.level)
+    text = build_workout_log_text(workout, reg, student, logs, level_reqs)
+
+    # Добавляем пометку о повышении уровня, если оно было на этой тренировке
+    if (
+        workout.status == "closed"
+        and reg.training_xp
+        and await _workout_caused_level_up(
+            session, student, workout.id, reg.training_xp
+        )
+    ):
+        text = fit_telegram_text(text + "\n🔥 Уровень повышен на этой тренировке!")
 
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="⬅️ К списку учеников", callback_data=StatsAction(action="stats_back")
+        text="⬅️ К профилю ученика",
+        callback_data=StatsAction(action="stats_student", student_id=student.id),
     )
     await callback.message.edit_text(
         text, reply_markup=builder.as_markup(), parse_mode="HTML"
@@ -231,9 +426,7 @@ async def stats_back_to_list(callback: CallbackQuery, session: AsyncSession):
     students = (
         (
             await session.execute(
-                select(User)
-                .where(User.role == "student")
-                .order_by(User.level.desc(), User.xp.desc())
+                select(User).order_by(User.level.desc(), User.xp.desc())
             )
         )
         .scalars()

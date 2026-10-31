@@ -10,6 +10,12 @@ from sqlalchemy import select, distinct
 # Твои реальные модели из проекта
 from models import User, Workout, WorkoutRegistration, Trick, TrickLog
 
+# Общая функция построения профиля + инлайн-кнопок деталей тренировок
+from handlers.coach.stats import (
+    build_student_profile_text,
+    _workout_details_kb,
+)
+
 # как мы считаем если их не используем?)
 from calculator import (
     calculate_single_trick,
@@ -403,4 +409,8 @@ async def student_my_profile(message: Message, session: AsyncSession):
         return
 
     text = await build_student_profile_text(user, session)
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(
+        text,
+        reply_markup=await _workout_details_kb(user, session),
+        parse_mode="HTML",
+    )
