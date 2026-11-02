@@ -22,6 +22,7 @@ def get_student_training_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛹 Отправить выполненный трюк")],
+            [KeyboardButton(text="🧩 Отправить связку")],
             [KeyboardButton(text="📊 Мои очки за сегодня")],
             [KeyboardButton(text="🚪 Покинуть тренировку")]
         ],

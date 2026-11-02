@@ -14,6 +14,16 @@ class WorkoutCreationStates(StatesGroup):
     waiting_for_track_coeff = State()# Ожидание выбора дорожки (50см, 80см, 120см) [2.2]
     waiting_for_combo = State()      # Ожидание ответа: "Это элемент комбо-связки?" [2.2]
 
+class ComboBuilderStates(StatesGroup):
+    """Пошаговый FSM-конструктор связки (общий для тренера и ученика)"""
+    choosing_first_trick = State()    # Выбор первого трюка (X)
+    waiting_first_track = State()     # Дорожка первого трюка
+    waiting_first_quantity = State()  # Конусы/качество первого трюка
+    menu = State()                    # Меню связки: + добавить / ✅ сохранить / ❌ отмена
+    choosing_next_trick = State()     # Выбор следующего трюка (Y)
+    waiting_next_track = State()      # Дорожка следующего трюка
+    waiting_next_quantity = State()   # Конусы/качество следующего трюка
+
 class WorkoutVerificationStates(StatesGroup):
     """Сценарий проверки и корректировки тренировок, заполненных учениками"""
     waiting_for_workout_select = State() # Тренер выбирает тренировку из списка ожидания

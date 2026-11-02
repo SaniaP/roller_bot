@@ -1,9 +1,11 @@
 import logging
+import uuid
 from typing import Optional
 from aiogram import Router, F, types
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, distinct
 
@@ -31,6 +33,8 @@ from handlers.coach.stats import build_student_profile_text
 from handlers.coach.helpers import get_trick_categories
 from handlers.coach.handbook import _handbook_categories_kb
 from states import StudentStates
+from states.coach_states import ComboBuilderStates
+from keyboards.coach_kb import ComboAction
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -323,6 +327,54 @@ async def student_save_final_trick(
 # =====================================================================
 # СТАТИСТИКА ЗА СЕССИЮ И ВЫХОД
 # =====================================================================
+
+
+@router.message(StudentStates.training_active, F.text == "🧩 Отправить связку")
+async def student_start_combo(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Ученик начинает конструктор связки (общий FSM с тренером)."""
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    if not user:
+        await message.answer("❌ Профиль не найден.")
+        return
+
+    # Ищем активную тренировку ученика
+    workout = (
+        await session.execute(select(Workout).where(Workout.status == "active"))
+    ).scalar_one_or_none()
+    if not workout:
+        await message.answer("❌ Нет активной тренировки.")
+        return
+
+    await state.update_data(
+        combo_workout_id=workout.id,
+        combo_student_id=user.id,
+        combo_items=[],
+        combo_prev_result=None,
+        combo_id=str(uuid.uuid4()),
+        combo_needs_review=True,  # ученик отправляет самостоятьно - ждет подтверждения
+    )
+
+    cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
+    kb = InlineKeyboardBuilder()
+    for c in cats:
+        if c:
+            kb.button(text=str(c), callback_data=f"cmb_cat:{c}")
+    kb.button(text="❌ Отмена связки", callback_data="cmb_cancel")
+    kb.adjust(2)
+
+    await message.answer(
+        "🧩 <b>Конструктор связки</b>\n\nШаг 1: выберите категорию первого трюка:",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
+    )
+    # Переводим ученика в общий FSM конструктора связки
+    await state.set_state(ComboBuilderStates.choosing_first_trick)
 
 
 @router.message(StudentStates.training_active, F.text == "📊 Мои очки за сегодня")

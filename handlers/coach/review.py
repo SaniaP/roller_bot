@@ -43,6 +43,29 @@ async def _get_pending_review(session: AsyncSession, workout_id: int):
     return grouped
 
 
+def _group_logs_by_combo(logs: list[TrickLog]) -> dict:
+    """Группирует логи: связки (combo_id) одним элементом, одиночные трюки — по одному.
+    Возвращает список элементов вида:
+      {"type": "combo", "combo_id": ..., "logs": [...]} или
+      {"type": "single", "log": TrickLog}
+    Связка считается одним элементом только если все её шаги нуждаются в проверке.
+    """
+    combos: dict[str, list[TrickLog]] = {}
+    singles: list[TrickLog] = []
+    for log in sorted(logs, key=lambda l: (l.combo_id or "", l.combo_step or 0)):
+        if log.combo_id:
+            combos.setdefault(log.combo_id, []).append(log)
+        else:
+            singles.append(log)
+
+    items = [
+        {"type": "combo", "combo_id": cid, "logs": steps}
+        for cid, steps in combos.items()
+    ]
+    items += [{"type": "single", "log": log} for log in singles]
+    return items
+
+
 async def _pending_for_student(
     session: AsyncSession, workout_id: int, student_id: int
 ) -> list[TrickLog]:
@@ -112,12 +135,16 @@ async def _send_student_card(
             .scalars()
             .all()
         }
+        # Группируем: связки одним элементом, одиночные трюки — отдельно
+        items = _group_logs_by_combo(list(logs))
+
         text = (
-            f"👤 <b>{student.full_name}</b> — самостоятельные трюки\n\n"
-            f"Нажмите на трюк, чтобы задать поправку исполнения и подтвердить его, "
+            f"👤 <b>{student.full_name}</b> — самостоятельные трюки и связки\n\n"
+            f"🧩 — связка (подтверждается целиком), 🎯 — одиночный трюк.\n"
+            f"Нажмите на элемент, чтобы задать поправку исполнения и подтвердить, "
             f"или подтвердите все сразу."
         )
-        kb = get_review_student_card_kb(workout_id, student_id, list(logs), tricks)
+        kb = get_review_student_card_kb(workout_id, student_id, items, tricks)
 
     if edit:
         await target.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -224,6 +251,30 @@ async def review_show_student(
     await callback.answer()
 
 
+@router.callback_query(ReviewAction.filter(F.action == "rv_edit_combo"))
+async def review_edit_combo(
+    callback: CallbackQuery, callback_data: ReviewAction, state: FSMContext
+):
+    """Тренер нажал на связку: подтверждаем все её шаги одной поправкой"""
+    await state.update_data(
+        review_workout_id=callback_data.workout_id,
+        review_student_id=callback_data.student_id,
+        review_log_id=callback_data.log_id,  # первый шаг — по нему найдем combo_id
+        review_is_combo=True,
+    )
+    await callback.message.edit_text(
+        "🧩 <b>Подтверждение связки</b>\n\n"
+        "Поправка применится ко всем шагам связки.\n"
+        "Введите поправку за качество исполнения в процентах:\n"
+        "• <code>0</code> — чисто (исполнение 1.0)\n"
+        "• <code>-10</code> — штраф 10% за помарки\n"
+        "• <code>10</code> или <code>+10</code> — бонус 10% за идеальное исполнение",
+        parse_mode="HTML",
+    )
+    await state.set_state(WorkoutVerificationStates.waiting_for_multiplier)
+    await callback.answer()
+
+
 @router.callback_query(ReviewAction.filter(F.action == "rv_edit_log"))
 async def review_edit_log(
     callback: CallbackQuery, callback_data: ReviewAction, state: FSMContext
@@ -270,16 +321,39 @@ async def review_process_multiplier(
     workout_id = data["review_workout_id"]
     student_id = data["review_student_id"]
     log_id = data["review_log_id"]
+    is_combo = data.get("review_is_combo", False)
 
-    log = await session.get(TrickLog, log_id)
-    if not log or not log.needs_review:
+    anchor_log = await session.get(TrickLog, log_id)
+    if not anchor_log or not anchor_log.needs_review:
         await message.answer(
             "⚠️ Этот трюк уже подтвержден.",
             reply_markup=await get_coach_menu_for(session),
         )
         return
 
-    await _confirm_logs(session, [log], execution_multiplier=execution_multiplier)
+    if is_combo and anchor_log.combo_id:
+        # Подтверждаем всю связку целиком одной поправкой
+        combo_logs = list(
+            (
+                await session.execute(
+                    select(TrickLog).where(
+                        TrickLog.workout_id == workout_id,
+                        TrickLog.student_id == student_id,
+                        TrickLog.combo_id == anchor_log.combo_id,
+                        TrickLog.needs_review == True,  # noqa: E712
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        await _confirm_logs(
+            session, combo_logs, execution_multiplier=execution_multiplier
+        )
+    else:
+        await _confirm_logs(
+            session, [anchor_log], execution_multiplier=execution_multiplier
+        )
 
     # Если у ученика еще остались неподтвержденные трюки — возвращаемся к его карточке,
     # иначе он исчезает из списка и возвращаемся к списку учеников

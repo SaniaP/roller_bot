@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from typing import List, Tuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -164,3 +164,36 @@ async def check_level_up(
             break
 
     return new_level, level_upgraded
+
+
+# ==
+# РАСЧЕТ КОМБО-СВЯЗОК
+# =====================================================================
+
+
+def combo_bonus_multiplier(diff_points: float) -> float:
+    """Процентный множитель связки: table_value = 10 - |diff| трактуется как проценты.
+    diff = 1 -> ×1.09, diff = 3 -> ×1.07 (7% как в исходной таблице).
+    Если |diff| >= 10 — множитель 1.0 (бонуса нет). Знак не важен."""
+    table_value = max(0.0, 10.0 - abs(diff_points))
+    return 1.0 + table_value / 100.0
+
+
+def calculate_combo_step(
+    prev_result: float,
+    next_trick_points: float,
+    db_session=None,
+) -> float:
+    """
+    Расчет Result следующего шага связки:
+      diff        = Y - X (без округления, знак не важен)
+      multiplier  = 1 + (10 - |diff|)%   # табличное значение как проценты: ×1.09 при diff=1
+      Result      = (((X + Y) / 2) + (1.0 if Y >= X else 0.0)) * multiplier
+    Если |diff| >= 10 — множитель равен 1 (бонуса нет).
+    prev_result - полный Result предыдущего шага (для шага 2 это чистый балл 1-го трюка).
+    Result последнего шага и есть стоимость связки - шаги НЕ суммируются.
+    db_session оставлен для совместимости вызовов, больше не используется.
+    """
+    avg = (prev_result + next_trick_points) / 2
+    bump = 1.0 if next_trick_points >= prev_result else 0.0
+    return (avg + bump) * combo_bonus_multiplier(next_trick_points - prev_result)

@@ -13,7 +13,7 @@ import logging
 
 from aiogram import Router
 
-from handlers.coach import menu, handbook, workout, trick_input, review, stats
+from handlers.coach import menu, handbook, workout, trick_input, review, stats, combo_builder
 
 logger = logging.getLogger(__name__)
 
@@ -24,3 +24,4 @@ router.include_router(workout.router)
 router.include_router(trick_input.router)
 router.include_router(review.router)
 router.include_router(stats.router)
+router.include_router(combo_builder.router)

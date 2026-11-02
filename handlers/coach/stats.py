@@ -161,7 +161,7 @@ def build_workout_log_text(
     logs: list[tuple[TrickLog, Trick]],
     level_reqs: LevelExperience | None,
 ) -> str:
-    """Детальная разбивка одной тренировки: шапка + трюки с зачетом и штрафами."""
+    """Детальная разбивка одной тренировки: шапка + связки блоками + одиночные трюки."""
     date_str = workout.date.strftime("%d.%m.%Y %H:%M") if workout.date else "—"
     parts = [
         f"🛹 <b>Тренировка №{workout.id}</b> от {date_str} ({workout.status})",
@@ -177,23 +177,55 @@ def build_workout_log_text(
     if penalties:
         parts.extend(f"<i>{p}</i>" for p in penalties)
 
-    for log, trick in logs:
-        mult_note = ""
-        if log.execution_multiplier and log.execution_multiplier != 1.0:
-            mult_note = f" (качество ×{log.execution_multiplier:.2f})"
-        line = (
-            f" • {trick.name}: {log.quantity} кон. (дорожка {log.cone_line}){mult_note} — "
-            f"{log.calculated_points:.1f} очк., +{log.calculated_xp} XP"
-        )
-        note = notes.get(log.id)
-        if note == "out":
-            # Полностью вне зачета (и спорт, и игра) — серым/зачеркнутым
-            line = f"<s><i>{line}</i></s> 🚫 не в зачет"
-        elif note == "sport":
-            line += " 🚫 не в зачет спорта"
-        elif note == "game":
-            line += " 🚫 не в зачет XP"
-        parts.append(line)
+    # Группируем: связки (combo_id) блоками, одиночные трюки — списком
+    combos: dict[str, list[tuple[TrickLog, Trick]]] = {}
+    singles: list[tuple[TrickLog, Trick]] = []
+    for pair in logs:
+        log, _t = pair
+        if log.combo_id:
+            combos.setdefault(log.combo_id, []).append(pair)
+        else:
+            singles.append(pair)
+
+    if combos:
+        parts.append("\n<b>🧩 Связки:</b>")
+        for cid, steps in combos.items():
+            parts.append(f"Связка (id {cid[:8]}…):")
+            for log, trick in sorted(steps, key=lambda p: p[0].combo_step or 0):
+                bonus = log.combo_bonus or 0.0
+                line = (
+                    f"   • шаг {log.combo_step}: {trick.name} — {log.quantity} кон. "
+                    f"({log.cone_line}) — {log.calculated_points:.2f} очк. + бонус {bonus:.2f}"
+                )
+                if notes.get(log.id) == "out":
+                    line = f"<s><i>{line}</i></s> 🚫"
+                parts.append(line)
+            # Стоимость связки = Result последнего шага (шаги НЕ суммируются):
+            # Result шага = calculated_points + combo_bonus этого шага
+            last = max(steps, key=lambda p: p[0].combo_step or 0)[0]
+            total = last.calculated_points + (last.combo_bonus or 0.0)
+            parts.append(
+                f"   ↳ Итог связки (Result последнего шага): <b>{total:.2f} очк.</b>"
+            )
+
+    if singles:
+        parts.append("\n<b>🎯 Одиночные трюки:</b>")
+        for log, trick in singles:
+            mult_note = ""
+            if log.execution_multiplier and log.execution_multiplier != 1.0:
+                mult_note = f" (качество ×{log.execution_multiplier:.2f})"
+            line = (
+                f" • {trick.name}: {log.quantity} кон. (дорожка {log.cone_line}){mult_note} — "
+                f"{log.calculated_points:.1f} очк., +{log.calculated_xp} XP"
+            )
+            note = notes.get(log.id)
+            if note == "out":
+                line = f"<s><i>{line}</i></s> 🚫 не в зачет"
+            elif note == "sport":
+                line += " 🚫 не в зачет спорта"
+            elif note == "game":
+                line += " 🚫 не в зачет XP"
+            parts.append(line)
 
     return fit_telegram_text("\n".join(parts))
 
