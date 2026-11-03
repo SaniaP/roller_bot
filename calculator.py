@@ -95,18 +95,35 @@ async def calculate_current_workout_totals(
     }
     categories_count = len(unique_categories)
 
-    # --- 1. СПОРТИВНЫЙ РЕЖИМ (Расчет баллов) ---
-    # Сортируем логи по убыванию набранных баллов
-    sorted_by_points = sorted(
-        trick_logs, key=lambda x: x.calculated_points, reverse=True
-    )
+    # --- Группировка логов: связка (общий combo_id) добавляет ОДИН доп. результат ---
+    # Шаги связки остаются в списке как обычные логи, но ДОПОЛНИТЕЛЬНО в список
+    # добавляется результат связки: последний combo_step, points = calculated_points + combo_bonus,
+    # xp = сумма XP всех шагов связки. Топ-8 (баллы) и топ-N (опыт) выбираются
+    # уже из этого расширенного списка, поэтому Result связки может попасть в топ.
+    combo_steps = {}
+    for log in trick_logs:
+        if log.combo_id:
+            combo_steps.setdefault(log.combo_id, []).append(log)
 
-    # Выбираем до 8 лучших трюков
-    top_8_logs = sorted_by_points[:8]
-    tricks_count = len(top_8_logs)
+    # Единый список результатов: (points, xp)
+    results = [(log.calculated_points, log.calculated_xp) for log in trick_logs]
+    for steps in combo_steps.values():
+        steps.sort(key=lambda l: l.combo_step or 0)
+        last = steps[-1]
+        combo_points = last.calculated_points + (last.combo_bonus or 0.0)
+        combo_xp = sum(s.calculated_xp for s in steps)
+        results.append((combo_points, combo_xp))
+
+    # --- 1. СПОРТИВНЫЙ РЕЖИМ (Расчет баллов) ---
+    # Сортируем результаты по убыванию набранных баллов
+    sorted_by_points = sorted(results, key=lambda r: r[0], reverse=True)
+
+    # Выбираем до 8 лучших трюков/связок
+    top_8 = sorted_by_points[:8]
+    tricks_count = len(top_8)
 
     if tricks_count > 0:
-        sum_points = sum(log.calculated_points for log in top_8_logs)
+        sum_points = sum(points for points, _ in top_8)
         avg_points = sum_points / tricks_count
 
         # Штраф 1: За нехватку трюков до 8 (по -3 балла за каждый отсутствующий)
@@ -124,12 +141,12 @@ async def calculate_current_workout_totals(
         final_sport_score = 0.0
 
     # --- 2. ИГРОВОЙ РЕЖИМ (Расчет опыта) ---
-    # Сортируем логи по убыванию набранного опыта
-    sorted_by_xp = sorted(trick_logs, key=lambda x: x.calculated_xp, reverse=True)
+    # Сортируем результаты по убыванию набранного опыта
+    sorted_by_xp = sorted(results, key=lambda r: r[1], reverse=True)
 
-    # В зачет опыта идет не более max_workout_logs лучших трюков
-    top_xp_logs = sorted_by_xp[:max_logs_for_xp]
-    total_xp = sum(log.calculated_xp for log in top_xp_logs)
+    # В зачет опыта идет не более max_workout_logs лучших трюков/связок
+    top_xp = sorted_by_xp[:max_logs_for_xp]
+    total_xp = sum(xp for _, xp in top_xp)
 
     # Штраф на опыт за невыполнение нормы по категориям трюков
     if categories_count < min_categories:

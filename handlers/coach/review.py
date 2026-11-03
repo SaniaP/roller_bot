@@ -155,28 +155,111 @@ async def _send_student_card(
 async def _confirm_logs(
     session: AsyncSession, logs: list[TrickLog], execution_multiplier: float = 1.0
 ):
-    """Подтверждает логи: устанавливает execution_multiplier и пересчитывает очки/XP"""
+    """Подтверждает логи: устанавливает execution_multiplier и пересчитывает очки/XP.
+    Если среди логов есть связка (общий combo_id) — она пересчитывается ПОСЛЕДОВАТЕЛЬНО:
+    сначала чистые баллы всех шагов с новой поправкой, затем combo_bonus каждого шага
+    по формуле Result = f(prev_result, Y), т.к. каждый шаг зависит от предыдущего."""
+    from calculator import calculate_combo_step
+
+    # Сгруппируем: связки пересчитываем особым образом, одиночные — напрямую
+    by_combo: dict[str, list[TrickLog]] = {}
+    singles: list[TrickLog] = []
     for log in logs:
+        if log.combo_id:
+            by_combo.setdefault(log.combo_id, []).append(log)
+        else:
+            singles.append(log)
+
+    # --- Одиночные трюки ---
+    for log in singles:
+        await _recalc_log(session, log, execution_multiplier)
+
+    # --- Связки: шаг 1..N последовательно ---
+    for combo_id, steps in by_combo.items():
+        steps.sort(key=lambda s: s.combo_step or 0)
+        prev_result: float | None = None
+        for step in steps:
+            # 1) пересчитываем чистый балл трюка с новой поправкой
+            await _recalc_log(session, step, execution_multiplier)
+            y = step.calculated_points
+            # 2) combo_bonus по формуле: Result = ((X+Y)/2 + bump) * mult; X = prev Result
+            if prev_result is None:
+                # шаг 1: бонуса нет, X для следующего шага = чистый балл
+                step.combo_bonus = 0.0
+                prev_result = y
+            else:
+                result = calculate_combo_step(prev_result, y)
+                step.combo_bonus = round(result - y, 2)
+                prev_result = result
+    await session.commit()
+
+
+async def _recalc_log(
+    session: AsyncSession, log: TrickLog, execution_multiplier: float
+):
+    """Пересчет одного лога с новой поправкой + обновление итогов регистрации"""
+    trick = await session.get(Trick, log.trick_id)
+    student = await session.get(User, log.student_id)
+    if not trick or not student:
+        return
+
+    new_points, new_xp = await calculate_single_trick(
+        trick=trick,
+        cone_line=log.cone_line,
+        quantity=log.quantity,
+        execution_multiplier=execution_multiplier,
+        skater_level=student.level,
+        db_session=session,
+    )
+    log.execution_multiplier = execution_multiplier
+    old_points, old_xp = log.calculated_points, log.calculated_xp
+    log.calculated_points = new_points
+    log.calculated_xp = new_xp
+    log.needs_review = False
+
+    # Пересчитываем накопленные результаты в регистрации на тренировку
+    reg = (
+        await session.execute(
+            select(WorkoutRegistration).where(
+                WorkoutRegistration.workout_id == log.workout_id,
+                WorkoutRegistration.student_id == log.student_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if reg:
+        reg.training_points += new_points - old_points
+        reg.training_xp += new_xp - old_xp
+
+
+async def _confirm_combo_steps(
+    session: AsyncSession, steps: list[TrickLog], percents: list[int]
+):
+    """Подтверждение связки с ОТДЕЛЬНОЙ поправкой на каждый шаг.
+    percents[i] — поправка в % для i-го шага (в порядке combo_step).
+    Сначала пересчитываем чистые баллы всех шагов, потом последовательно combo_bonus."""
+    from calculator import calculate_combo_step
+
+    # 1) чистые баллы каждого шага со своей поправкой
+    for log, pct in zip(steps, percents):
+        mult = percentage_to_multiplier(pct)
         trick = await session.get(Trick, log.trick_id)
         student = await session.get(User, log.student_id)
         if not trick or not student:
             continue
-
         new_points, new_xp = await calculate_single_trick(
             trick=trick,
             cone_line=log.cone_line,
             quantity=log.quantity,
-            execution_multiplier=execution_multiplier,
+            execution_multiplier=mult,
             skater_level=student.level,
             db_session=session,
         )
-        log.execution_multiplier = execution_multiplier
         old_points, old_xp = log.calculated_points, log.calculated_xp
+        log.execution_multiplier = mult
         log.calculated_points = new_points
         log.calculated_xp = new_xp
         log.needs_review = False
 
-        # Пересчитываем накопленные результаты в регистрации на тренировку
         reg = (
             await session.execute(
                 select(WorkoutRegistration).where(
@@ -188,6 +271,19 @@ async def _confirm_logs(
         if reg:
             reg.training_points += new_points - old_points
             reg.training_xp += new_xp - old_xp
+
+    # 2) пересчет цепочки бонусов: Result = f(prev Result, Y)
+    prev_result: float | None = None
+    for step in steps:
+        y = step.calculated_points
+        if prev_result is None:
+            step.combo_bonus = 0.0
+            prev_result = y
+        else:
+            result = calculate_combo_step(prev_result, y)
+            step.combo_bonus = round(result - y, 2)
+            prev_result = result
+
     await session.commit()
 
 
@@ -264,11 +360,14 @@ async def review_edit_combo(
     )
     await callback.message.edit_text(
         "🧩 <b>Подтверждение связки</b>\n\n"
-        "Поправка применится ко всем шагам связки.\n"
-        "Введите поправку за качество исполнения в процентах:\n"
-        "• <code>0</code> — чисто (исполнение 1.0)\n"
-        "• <code>-10</code> — штраф 10% за помарки\n"
-        "• <code>10</code> или <code>+10</code> — бонус 10% за идеальное исполнение",
+        "Каждый трюк связки подтверждается ОТДЕЛЬНО.\n"
+        "Введите поправки в процентах через пробел — по одной на каждый шаг связки, "
+        "в порядке шагов.\n\n"
+        "Пример для связки из 3 трюков: <code>0 10 -5</code>\n"
+        "→ шаг 1: ×1.0, шаг 2: ×1.1, шаг 3: ×0.95\n\n"
+        "• <code>0</code> — чисто (×1.0)\n"
+        "• <code>-10</code> — штраф 10%\n"
+        "• <code>10</code> — бонус 10%",
         parse_mode="HTML",
     )
     await state.set_state(WorkoutVerificationStates.waiting_for_multiplier)
@@ -301,19 +400,27 @@ async def review_edit_log(
 async def review_process_multiplier(
     message: Message, state: FSMContext, session: AsyncSession
 ):
-    """Принимаем поправку в %, подтверждаем трюк с вычисленным множителем"""
-    text_input = (message.text or "").strip().replace(" ", "").replace("%", "")
+    """Принимаем поправку(и) в %, подтверждаем трюк/связку с вычисленными множителями"""
+    raw = (message.text or "").strip().replace("%", "")
+    tokens = raw.split()
 
-    if not re.match(r"^[+-]?\d+$", text_input):
+    if not tokens:
         await message.answer(
             "⚠️ Введите целое число в процентах: например 0, -10 или 15"
         )
         return
 
-    pct = int(text_input)
-    if pct < -100:
-        pct = -100
-    execution_multiplier = percentage_to_multiplier(pct)
+    # Парсим поправки: одно значение — одиночный трюк (или одна поправка на всю
+    # связку), несколько значений через пробел — по одному на каждый шаг связки
+    percents_input: list[int] = []
+    for tok in tokens:
+        if not re.match(r"^[+-]?\d+$", tok):
+            await message.answer(
+                "⚠️ Введите целые числа в процентах через пробел: "
+                "один трюк — 0, связка из 3 шагов — 0 10 -5"
+            )
+            return
+        percents_input.append(max(int(tok), -100))
 
     data = await state.get_data()
     await state.clear()
@@ -332,7 +439,8 @@ async def review_process_multiplier(
         return
 
     if is_combo and anchor_log.combo_id:
-        # Подтверждаем всю связку целиком одной поправкой
+        # Каждый трюк связки подтверждается СВОЕЙ поправкой (ответ на сообщение):
+        # тренер ввел несколько значений через пробел, по одному на шаг
         combo_logs = list(
             (
                 await session.execute(
@@ -347,12 +455,22 @@ async def review_process_multiplier(
             .scalars()
             .all()
         )
-        await _confirm_logs(
-            session, combo_logs, execution_multiplier=execution_multiplier
-        )
+        combo_logs.sort(key=lambda s: s.combo_step or 0)
+
+        percents = percents_input[:]
+        # Значений меньше шагов — остаток подтверждаем последним введенным значением
+        # (одно значение = одна поправка на все шаги связки)
+        while len(percents) < len(combo_logs):
+            percents.append(percents[-1])
+
+        # Пересчет: _confirm_logs с пошаговыми поправками
+        await _confirm_combo_steps(session, combo_logs, percents)
     else:
+        # Одиночный трюк: берем первое значение (лишние игнорируем)
         await _confirm_logs(
-            session, [anchor_log], execution_multiplier=execution_multiplier
+            session,
+            [anchor_log],
+            execution_multiplier=percentage_to_multiplier(percents_input[0]),
         )
 
     # Если у ученика еще остались неподтвержденные трюки — возвращаемся к его карточке,

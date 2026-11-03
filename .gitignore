@@ -16,3 +16,6 @@ venv/
 *.pdf
 *.docx
 *.doc
+*.xlsx
+*.xls
+*.xlsm

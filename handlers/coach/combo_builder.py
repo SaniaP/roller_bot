@@ -25,12 +25,60 @@ from sqlalchemy import select
 
 from models import User, Trick, TrickLog, Workout
 from states.coach_states import ComboBuilderStates
+from states import StudentStates
 from keyboards.coach_kb import TrickAction, ComboAction
 from calculator import calculate_single_trick, calculate_combo_step
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+async def _restore_menu_after_combo(
+    message_or_callback, state: FSMContext, session: AsyncSession
+):
+    """Возврат после сохранения/отмены связки:
+    - тренеру — в карточку спортсмена,
+    - ученику — FSM training_active + тренировочное меню (иначе его кнопки
+      перестают обрабатываться: student_start_combo затирал training_active,
+      а state.clear() оставлял ученика вообще без состояния).
+    """
+    data = await state.get_data()
+    student_id = data.get("combo_student_id")
+    workout_id = data.get("combo_workout_id")
+
+    saver = (
+        await session.execute(
+            select(User).where(User.telegram_id == message_or_callback.from_user.id)
+        )
+    ).scalar_one_or_none()
+
+    from keyboards.skater_kb import get_student_training_menu
+
+    if saver and saver.id == student_id and saver.role == "student":
+        # Ученик: возвращаем рабочее состояние тренировки и его меню
+        await state.clear()
+        await state.set_state(StudentStates.training_active)
+        await state.update_data(current_workout_id=workout_id)
+        await message_or_callback.message.answer(
+            "🧩 Связка отправлена тренеру на проверку!\n"
+            "Очки и XP засчитаются после подтверждения.",
+            reply_markup=get_student_training_menu(),
+        )
+    else:
+        # Тренер: возвращаемся в карточку спортсмена
+        await state.clear()
+        from handlers.coach.workout import show_skater_card_or_main_list
+
+        await show_skater_card_or_main_list(
+            message_or_callback,
+            TrickAction(
+                action="select_skater",
+                workout_id=workout_id,
+                student_id=student_id,
+            ),
+            session,
+        )
 
 
 # ---------------------------------------------------------------------
@@ -311,19 +359,8 @@ async def _show_combo_menu(
 async def combo_cancel(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ):
-    data = await state.get_data()
-    workout_id, student_id = data.get("combo_workout_id"), data.get("combo_student_id")
-    await state.clear()
-    # возврат в карточку спортсмена
-    from handlers.coach.workout import show_skater_card_or_main_list
-
-    await show_skater_card_or_main_list(
-        callback,
-        TrickAction(
-            action="select_skater", workout_id=workout_id, student_id=student_id
-        ),
-        session,
-    )
+    # Возврат: тренеру — в карточку спортсмена, ученику — в тренировочное меню
+    await _restore_menu_after_combo(callback, state, session)
     await callback.answer("Связка отменена")
 
 
@@ -368,6 +405,23 @@ async def combo_next_cat(
             callback_data.student_id,
             callback_data.category,
             list(tricks),
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    ComboBuilderStates.choosing_next_trick, ComboAction.filter(F.action == "combo_back")
+)
+async def combo_back_to_categories(
+    callback: CallbackQuery, callback_data: ComboAction, session: AsyncSession
+):
+    """Кнопка «⬅️ К категориям» на этапе выбора следующего трюка связки"""
+    cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
+    await callback.message.edit_text(
+        "Выберите категорию следующего трюка связки:",
+        reply_markup=_combo_categories_kb(
+            callback_data.workout_id, callback_data.student_id, list(cats)
         ),
     )
     await callback.answer()
@@ -476,10 +530,17 @@ async def combo_save(
 
     student = await session.get(User, student_id)
 
-    # needs_review определяется тем, КТО вносит связку (записано при старте конструктора):
-    # тренер вносит от имени ученика лично - подтверждение не требуется;
-    # ученик отправляет самостоятьно - ждет подтверждения.
-    needs_review = bool(data.get("combo_needs_review", False))
+    # needs_review определяем надежно - по тому, КТО ФАКТИЧЕСКИ нажал «Сохранить»:
+    # если сохранил сам ученик со своего аккаунта - связка самостоятельная и ждет
+    # подтверждения; если тренер (со своего аккаунта, в т.ч. от имени ученика) - нет.
+    # FSM-данные не используем: состояние могло сброситься, и флаг терялся,
+    # из-за чего связки учеников не попадали в меню проверки.
+    saver = (
+        await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+    ).scalar_one_or_none()
+    needs_review = bool(saver and saver.id == student.id and saver.role == "student")
 
     saved = 0
     for step, it in enumerate(items, start=1):
@@ -511,7 +572,6 @@ async def combo_save(
         saved += 1
 
     await session.commit()
-    await state.clear()
 
     await callback.message.edit_text(
         f"✅ Связка из {saved} трюков сохранена!\n"
@@ -520,10 +580,17 @@ async def combo_save(
     )
     await callback.answer()
 
+    # Возврат: тренеру — в карточку спортсмена, ученику — в тренировочное меню
+    await _restore_menu_after_combo(callback, state, session)
+
 
 # Универсальный обработчик отмены на любых стадиях (cmb_cancel из inline-клавиатур)
 @router.callback_query(F.data == "cmb_cancel")
-async def combo_cancel_universal(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("🧩 Конструктор связки закрыт.")
+async def combo_cancel_universal(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    # Возврат: тренеру — в карточку спортсмена, ученику — в тренировочное меню.
+    # Раньше здесь был state.clear() без восстановления training_active,
+    # из-за чего у ученика после отмены переставали работать все кнопки меню.
+    await _restore_menu_after_combo(callback, state, session)
     await callback.answer("Отменено")
