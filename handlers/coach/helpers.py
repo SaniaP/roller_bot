@@ -62,6 +62,33 @@ def percentage_to_multiplier(pct: int) -> float:
     return max(0.0, 1.0 + pct / 100.0)
 
 
+def level_progress_percent(current_xp: int, current_level: int, next_reqs) -> float:
+    """Процент прогресса до следующего уровня.
+
+    next_reqs — запись LevelExperience для уровня level+1 (required_xp — суммарный
+    XP, нужный для достижения следующего уровня). Прогресс считается от порога
+    ТЕКУЩЕГО уровня: (xp - required_xp[текущий]) / (required_xp[следующий] - required_xp[текущий]).
+    prev_reqs — запись LevelExperience текущего уровня (передается отдельно, т.к. хелпер не ходит в БД).
+    """
+    raise NotImplementedError
+
+
+def level_progress_percent(
+    current_xp: int, prev_required_xp: int, next_required_xp: int
+) -> float:
+    """Процент прогресса до следующего уровня.
+
+    required_xp в level_experience — СУММАРНЫЙ опыт, нужный для достижения уровня.
+    Прогресс внутри уровня считается от порога текущего уровня:
+      (xp - required_xp[текущий]) / (required_xp[следующий] - required_xp[текущий]) * 100
+    """
+    span = next_required_xp - prev_required_xp
+    if span <= 0:
+        return 100.0
+    gained = current_xp - prev_required_xp
+    return max(0.0, min(100.0, gained / span * 100))
+
+
 def draw_progress_bar(
     percent: float, length: int = 10, filled: str = "█", empty: str = "░"
 ) -> str:

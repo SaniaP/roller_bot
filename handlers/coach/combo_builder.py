@@ -17,7 +17,7 @@ import uuid
 import logging
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from states.coach_states import ComboBuilderStates
 from states import StudentStates
 from keyboards.coach_kb import TrickAction, ComboAction
 from calculator import calculate_single_trick, calculate_combo_step
+from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_markup
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +57,28 @@ async def _restore_menu_after_combo(
     from keyboards.skater_kb import get_student_training_menu
 
     if saver and saver.id == student_id and saver.role == "student":
+        # Ожидаемое начисление по связке: Result последнего шага и сумма XP всех шагов
+        items = data.get("combo_items") or []
+        combo_points = 0.0
+        combo_xp = 0
+        if items:
+            last = items[-1]
+            combo_points = last["points"] + last.get("bonus", 0.0)
+            combo_xp = data.get("combo_total_xp", 0)
+
         # Ученик: возвращаем рабочее состояние тренировки и его меню
         await state.clear()
         await state.set_state(StudentStates.training_active)
-        await state.update_data(current_workout_id=workout_id)
+        await state.update_data(
+            current_workout_id=workout_id,
+            cone_line=data.get("cone_line"),
+        )
         await message_or_callback.message.answer(
-            "🧩 Связка отправлена тренеру на проверку!\n"
-            "Очки и XP засчитаются после подтверждения.",
+            "🧩 Связка отправлена тренеру на проверку!\n\n"
+            f"📊 **Ожидаемое начисление:**\n"
+            f"• Баллы: +{round(combo_points, 2)}\n"
+            f"• Опыт: +{combo_xp} XP\n\n"
+            "⏳ Очки и XP засчитаются после подтверждения тренером.",
             reply_markup=get_student_training_menu(),
         )
     else:
@@ -199,7 +215,11 @@ async def combo_start(
     )
     await state.set_state(ComboBuilderStates.choosing_first_trick)
 
-    # Сразу показываем категории первого трюка — как в меню студента
+    # Текущая дорожка — общая с вводом трюков (по умолчанию 80, меняется кнопками)
+    data = await state.get_data()
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+
+    # Сразу показываем категории первого трюка + переключатель дорожки
     cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
     kb = InlineKeyboardBuilder()
     for c in cats:
@@ -207,10 +227,13 @@ async def combo_start(
             kb.button(text=str(c), callback_data=f"cmb_cat:{c}")
     kb.button(text="❌ Отмена связки", callback_data="cmb_cancel")
     kb.adjust(2)
+    rows = [track_row_markup(cone_line, "cmb_coneset:{line}")]
+    rows += list(kb.as_markup().inline_keyboard)
 
     await callback.message.edit_text(
-        "🧩 <b>Конструктор связки</b>\n\nШаг 1: выберите категорию первого трюка:",
-        reply_markup=kb.as_markup(),
+        f"🧩 <b>Конструктор связки</b>\n\n{cone_line_text(cone_line)}\n\n"
+        "Шаг 1: выберите категорию первого трюка:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -219,6 +242,35 @@ async def combo_start(
 # ---------------------------------------------------------------------
 # Выбор первого трюка (категории -> трюк -> дорожка -> конусы)
 # ---------------------------------------------------------------------
+
+
+@router.callback_query(
+    ComboBuilderStates.choosing_first_trick, F.data.startswith("cmb_coneset:")
+)
+async def combo_switch_cone_line(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Смена дорожки в конструкторе связки (общая с вводом трюков, запоминается)."""
+    cone_line = callback.data.split(":")[1]
+    await state.update_data(cone_line=cone_line)
+
+    cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
+    kb = InlineKeyboardBuilder()
+    for c in cats:
+        if c:
+            kb.button(text=str(c), callback_data=f"cmb_cat:{c}")
+    kb.button(text="❌ Отмена связки", callback_data="cmb_cancel")
+    kb.adjust(2)
+    rows = [track_row_markup(cone_line, "cmb_coneset:{line}")]
+    rows += list(kb.as_markup().inline_keyboard)
+
+    await callback.message.edit_text(
+        f"🧩 <b>Конструктор связки</b>\n\n{cone_line_text(cone_line)}\n\n"
+        "Шаг 1: выберите категорию первого трюка:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await callback.answer(f"Дорожка: {cone_line} см")
 
 
 @router.callback_query(
@@ -254,28 +306,14 @@ async def combo_first_trick(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ):
     trick_id = int(callback.data.split(":")[1])
-    await state.update_data(combo_trick_id=trick_id)
-    await state.set_state(ComboBuilderStates.waiting_first_track)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📏 50 см", callback_data="cmb_cone_50")
-    kb.button(text="📏 80 см", callback_data="cmb_cone_80")
-    kb.button(text="📏 120 см", callback_data="cmb_cone_120")
-    kb.adjust(3)
-    await callback.message.edit_text(
-        "Выберите размер дорожки:", reply_markup=kb.as_markup()
-    )
-    await callback.answer()
-
-
-@router.callback_query(
-    ComboBuilderStates.waiting_first_track, F.data.startswith("cmb_cone_")
-)
-async def combo_first_cone(callback: CallbackQuery, state: FSMContext):
-    cone = callback.data.split("_")[-1]
-    await state.update_data(combo_cone=cone)
+    data = await state.get_data()
+    # Дорожка — общая с вводом трюков (по умолчанию 80, меняется на экране категорий)
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+    await state.update_data(combo_trick_id=trick_id, combo_cone=cone_line)
     await state.set_state(ComboBuilderStates.waiting_first_quantity)
+
     await callback.message.edit_text(
+        f"{cone_line_text(cone_line)}\n\n"
         "🔢 Отправьте количество конусов (можно с поправкой качества: `8,-10` или `11,20`):",
         parse_mode="Markdown",
     )
@@ -297,6 +335,17 @@ async def combo_first_quantity(
 
     data = await state.get_data()
     trick = await session.get(Trick, data["combo_trick_id"])
+    student = await session.get(User, data["combo_student_id"])
+
+    # XP первого шага считаем тем же механизмом, что и при сохранении связки
+    _, xp = await calculate_single_trick(
+        trick=trick,
+        cone_line=data["combo_cone"],
+        quantity=quantity,
+        execution_multiplier=mult,
+        skater_level=student.level,
+        db_session=session,
+    )
 
     points = await _pure_trick_points(trick, data["combo_cone"], quantity, mult)
 
@@ -312,6 +361,7 @@ async def combo_first_quantity(
             }
         ],
         combo_prev_result=points,
+        combo_total_xp=xp,
     )
     await state.set_state(ComboBuilderStates.menu)
 
@@ -433,28 +483,13 @@ async def combo_back_to_categories(
 async def combo_next_pick(
     callback: CallbackQuery, callback_data: ComboAction, state: FSMContext
 ):
-    await state.update_data(combo_trick_id=callback_data.trick_id)
-    await state.set_state(ComboBuilderStates.waiting_next_track)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📏 50 см", callback_data="cmb_cone2_50")
-    kb.button(text="📏 80 см", callback_data="cmb_cone2_80")
-    kb.button(text="📏 120 см", callback_data="cmb_cone2_120")
-    kb.adjust(3)
-    await callback.message.edit_text(
-        "Выберите размер дорожки:", reply_markup=kb.as_markup()
-    )
-    await callback.answer()
-
-
-@router.callback_query(
-    ComboBuilderStates.waiting_next_track, F.data.startswith("cmb_cone2_")
-)
-async def combo_next_cone(callback: CallbackQuery, state: FSMContext):
-    cone = callback.data.split("_")[-1]
-    await state.update_data(combo_cone=cone)
+    data = await state.get_data()
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+    await state.update_data(combo_trick_id=callback_data.trick_id, combo_cone=cone_line)
     await state.set_state(ComboBuilderStates.waiting_next_quantity)
+
     await callback.message.edit_text(
+        f"{cone_line_text(cone_line)}\n\n"
         "🔢 Отправьте количество конусов (можно с поправкой: `8,-10` / `11,20`):",
         parse_mode="Markdown",
     )
@@ -477,7 +512,18 @@ async def combo_next_quantity(
 
     data = await state.get_data()
     trick = await session.get(Trick, data["combo_trick_id"])
+    student = await session.get(User, data["combo_student_id"])
     prev_result = data["combo_prev_result"]
+
+    # XP шага считаем тем же механизмом, что и при сохранении связки
+    _, xp = await calculate_single_trick(
+        trick=trick,
+        cone_line=data["combo_cone"],
+        quantity=quantity,
+        execution_multiplier=mult,
+        skater_level=student.level,
+        db_session=session,
+    )
 
     y_points = await _pure_trick_points(trick, data["combo_cone"], quantity, mult)
 
@@ -496,7 +542,11 @@ async def combo_next_quantity(
             "bonus": combo_bonus,
         }
     )
-    await state.update_data(combo_items=items, combo_prev_result=result)
+    await state.update_data(
+        combo_items=items,
+        combo_prev_result=result,
+        combo_total_xp=data.get("combo_total_xp", 0) + xp,
+    )
     await state.set_state(ComboBuilderStates.menu)
 
     await _show_combo_menu(message, state, session)

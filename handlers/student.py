@@ -27,11 +27,11 @@ from calculator import (
 from keyboards.skater_kb import (
     get_student_main_menu,
     get_student_training_menu,
-    get_distance_inline_kb,
 )
 from handlers.coach.stats import build_student_profile_text
 from handlers.coach.helpers import get_trick_categories
 from handlers.coach.handbook import _handbook_categories_kb
+from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_markup
 from states import StudentStates
 from states.coach_states import ComboBuilderStates
 from keyboards.coach_kb import ComboAction
@@ -139,7 +139,9 @@ async def student_process_pin(
 @router.message(
     StudentStates.training_active, F.text == "🛹 Отправить выполненный трюк"
 )
-async def show_categories_dynamic(message: Message, session: AsyncSession):
+async def show_categories_dynamic(
+    message: Message, state: FSMContext, session: AsyncSession
+):
     """Динамически вытаскиваем уникальные категории слалома из таблицы Tricks"""
     query = select(distinct(Trick.category))
     categories = (await session.execute(query)).scalars().all()
@@ -159,10 +161,39 @@ async def show_categories_dynamic(message: Message, session: AsyncSession):
                 ]
             )
 
+    # Строка переключения дорожки (по умолчанию 80, запоминается между трюками)
+    data = await state.get_data()
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+    keyboard = [track_row_markup(cone_line, "st_coneset:{line}")] + buttons
+
     await message.answer(
-        "Выберите категорию трюка:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+        f"Выберите категорию трюка.\n{cone_line_text(cone_line)}",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
     )
+
+
+@router.callback_query(StudentStates.training_active, F.data.startswith("st_coneset:"))
+async def student_switch_cone_line(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Смена дорожки учеником прямо на экране категорий (запоминается в FSM)."""
+    cone_line = callback.data.split(":")[1]
+    await state.update_data(cone_line=cone_line)
+
+    categories = (
+        (await session.execute(select(distinct(Trick.category)))).scalars().all()
+    )
+    buttons = [
+        [types.InlineKeyboardButton(text=str(cat), callback_data=f"st_cat:{cat}")]
+        for cat in categories
+        if cat
+    ]
+    keyboard = [track_row_markup(cone_line, "st_coneset:{line}")] + buttons
+    await callback.message.edit_text(
+        f"Выберите категорию трюка.\n{cone_line_text(cone_line)}",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+    )
+    await callback.answer(f"Дорожка: {cone_line} см")
 
 
 @router.callback_query(StudentStates.training_active, F.data.startswith("st_cat:"))
@@ -220,29 +251,18 @@ async def back_to_categories(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(StudentStates.training_active, F.data.startswith("st_trick:"))
 async def student_select_trick_done(callback: CallbackQuery, state: FSMContext):
-    """Трюк выбран. Переходим к выбору дорожки (cone_line)"""
+    """Трюк выбран: сразу запрашиваем конусы, дорожка берется из FSM"""
     trick_id = int(callback.data.split(":")[1])
 
-    await state.update_data(selected_trick_id=trick_id)
-    await state.set_state(StudentStates.waiting_for_distance)
+    # Дорожка берется из FSM (по умолчанию 80, меняется на экране категорий)
+    data = await state.get_data()
+    distance = data.get("cone_line", DEFAULT_CONE_LINE)
 
-    await callback.message.edit_text(
-        "Выберите размер дорожки (расстояние между конусами):",
-        reply_markup=get_distance_inline_kb(),
-    )
-    await callback.answer()
-
-
-@router.callback_query(StudentStates.waiting_for_distance, F.data.startswith("dist:"))
-async def student_select_distance_done(callback: CallbackQuery, state: FSMContext):
-    """Дорожка выбрана. Запрашиваем количество конусов (quantity)"""
-    distance = callback.data.split(":")[1]  # Строка "50", "80" или "120"
-
-    await state.update_data(selected_distance=distance)
+    await state.update_data(selected_trick_id=trick_id, selected_distance=distance)
     await state.set_state(StudentStates.waiting_for_cones)
 
     await callback.message.edit_text(
-        f"Выбрана дорожка: `{distance} см`.\n\n"
+        f"{cone_line_text(distance)}\n\n"
         "Отправьте сообщением количество чисто пройденных конусов (например: `20`):",
         parse_mode="Markdown",
     )
@@ -316,8 +336,10 @@ async def student_save_final_trick(
         f"✨ Трюк отправлен на проверку тренеру!\n\n"
         f"🛹 Трюк: {trick.name}\n"
         f"📏 Дорожка: {distance} см\n"
-        f"🪚 Пройдено конусов: {cones_count} шт.\n"
-        f"🎯 Исполнение: 1.0 (Чисто)\n\n"
+        f"🪚 Пройдено конусов: {cones_count} шт.\n\n"
+        f"📊 **Ожидаемое начисление:**\n"
+        f"• Баллы: +{points_earned}\n"
+        f"• Опыт: +{xp_earned} XP\n\n"
         f"⏳ Очки и XP засчитаются после подтверждения тренером.",
         reply_markup=get_student_training_menu(),
         parse_mode="Markdown",
@@ -378,8 +400,11 @@ async def student_start_combo(
 
 
 @router.message(StudentStates.training_active, F.text == "📊 Мои очки за сегодня")
-async def student_today_stats(message: Message, session: AsyncSession):
-    """Выводит текущую сумму набранных очков напрямую из workout_registrations"""
+async def student_today_stats(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Перечень отправленных тренеру трюков и связок со статусом
+    (на проверке / подтвержден) + ожидаемые итоги тренировки."""
     user = (
         await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
@@ -394,21 +419,94 @@ async def student_today_stats(message: Message, session: AsyncSession):
         await message.answer("Тренировка уже завершена.")
         return
 
-    reg_query = select(WorkoutRegistration).where(
-        WorkoutRegistration.workout_id == active_workout.id,
-        WorkoutRegistration.student_id == user.id,
-    )
-    registration = (await session.execute(reg_query)).scalar_one_or_none()
+    data = await state.get_data()
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
 
-    if not registration:
-        await message.answer("У вас пока нет записей на этой тренировке.")
+    logs = (
+        (
+            await session.execute(
+                select(TrickLog)
+                .where(
+                    TrickLog.workout_id == active_workout.id,
+                    TrickLog.student_id == user.id,
+                )
+                .order_by(TrickLog.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if not logs:
+        await message.answer(
+            "📭 Вы пока не отправляли трюки на этой тренировке.",
+            reply_markup=get_student_training_menu(),
+        )
         return
 
+    # Группируем: связки одним элементом, одиночные трюки — по одному
+    from handlers.coach.review import _group_logs_by_combo
+
+    tricks = {
+        t.id: t
+        for t in (
+            await session.scalars(
+                select(Trick).where(Trick.id.in_([l.trick_id for l in logs]))
+            )
+        ).all()
+    }
+
+    items = _group_logs_by_combo(list(logs))
+    lines = ["📊 Мои очки за сегодня:\n"]
+    for item in items:
+        if item["type"] == "combo":
+            steps = item["logs"]
+            names = " → ".join(
+                tricks.get(s.trick_id).name if tricks.get(s.trick_id) else "?"
+                for s in steps
+            )
+            confirmed = all(not s.needs_review for s in steps)
+            status = "✅ подтверждена" if confirmed else "⏳ на проверке"
+            # Стоимость связки = Result последнего шага, XP = сумма шагов
+            last = max(steps, key=lambda s: s.combo_step or 0)
+            combo_points = last.calculated_points + (last.combo_bonus or 0.0)
+            combo_xp = sum(s.calculated_xp for s in steps)
+            lines.append(
+                f"🧩 Связка: {names} — "
+                f"{round(combo_points, 2)} очков, +{combo_xp} XP — {status}"
+            )
+        else:
+            log = item["log"]
+            trick = tricks.get(log.trick_id)
+            name = trick.name if trick else "Трюк"
+            status = "✅ подтвержден" if not log.needs_review else "⏳ на проверке"
+            lines.append(
+                f"🎯 {name}: {log.quantity} конусов, (дорожка {log.cone_line}) — "
+                f"{log.calculated_points} очков, +{log.calculated_xp} XP — {status}"
+            )
+
+    # Итог по подтвержденным: как в журнале тренировок (калькулятор итогов)
+    from calculator import calculate_current_workout_totals
+
+    student = await session.get(User, user.id)
+    sport_score, total_xp = await calculate_current_workout_totals(
+        list(logs), student, session
+    )
+    pending = [l for l in logs if l.needs_review]
+    if pending:
+        lines.append(
+            f"\n⏳ На проверке: {len(pending)} — очки засчитаются после подтверждения тренером.\n"
+            f"📊 Текущий результат (предварительно): {sport_score} очков, +{total_xp} XP"
+        )
+    else:
+        lines.append(
+            f"\n✅ Все отправленные трюки подтверждены тренером.\n"
+            f"📊 Итог тренировки: {sport_score} очков, +{total_xp} XP"
+        )
+
     await message.answer(
-        f"📊 Твои результаты на текущем занятии:\n\n"
-        f"✨ Набранный опыт: +{registration.training_xp} XP\n"
-        f"🏆 Спортивные баллы: +{registration.training_points} PTS",
-        parse_mode="Markdown",
+        "\n".join(lines),
+        reply_markup=get_student_training_menu(),
     )
 
 

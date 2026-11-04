@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from models import User, Workout, WorkoutRegistration, TrickLog, Trick, LevelExperience
-from handlers.coach.helpers import get_coach_menu_for, draw_progress_bar
+from handlers.coach.helpers import (
+    get_coach_menu_for,
+    draw_progress_bar,
+    level_progress_percent,
+)
 
 router = Router()
 
@@ -80,8 +84,9 @@ async def coach_stats(message: Message, session: AsyncSession):
         bp = f"{best_points:.1f}" if best_points is not None else "—"
         next_reqs = await session.get(LevelExperience, st.level + 1)
         if next_reqs:
-            req_xp = next_reqs.required_xp
-            percent = min(100.0, (st.xp / req_xp * 100) if req_xp > 0 else 0.0)
+            cur_reqs = await session.get(LevelExperience, st.level)
+            prev_xp = cur_reqs.required_xp if cur_reqs else 0
+            percent = level_progress_percent(st.xp, prev_xp, next_reqs.required_xp)
             bar = draw_progress_bar(percent)
         else:
             bar = "🏆 Максимальный уровень достигнут!"
@@ -149,8 +154,9 @@ async def _progress_line(student: User, session: AsyncSession) -> str:
     next_reqs = await session.get(LevelExperience, student.level + 1)
     if not next_reqs:
         return f"{header}\n🏆 Максимальный уровень достигнут!"
-    req_xp = next_reqs.required_xp
-    percent = min(100.0, (student.xp / req_xp * 100) if req_xp > 0 else 0.0)
+    cur_reqs = await session.get(LevelExperience, student.level)
+    prev_xp = cur_reqs.required_xp if cur_reqs else 0
+    percent = level_progress_percent(student.xp, prev_xp, next_reqs.required_xp)
     return f"{header}\n{draw_progress_bar(percent)}"
 
 

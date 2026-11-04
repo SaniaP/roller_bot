@@ -1,17 +1,19 @@
-"""Пошаговый инлайн-ввод трюков тренером (FSM: дорожка -> количество -> сохранение)."""
+"""Ввод трюков тренером (упрощенный сценарий).
+
+Отдельный шаг выбора дорожки убран: текущая дорожка (по умолчанию 80 см)
+показывается прямо на экране категорий и переключается там же. Выбранная
+дорожка запоминается в FSM и действует до следующей смены.
+"""
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
 from models import User, Trick, TrickLog
-from states.coach_states import WorkoutCreationStates
 from keyboards.coach_kb import (
-    get_cancel_keyboard,
-    get_track_coeff_kb,
     get_categories_kb,
     get_tricks_by_cat_kb,
     WorkoutAction,
@@ -23,30 +25,84 @@ from handlers.coach.helpers import (
     percentage_to_multiplier,
     format_accuracy_text,
 )
+from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_markup
+from states.coach_states import WorkoutCreationStates
 from handlers.coach.workout import show_skater_card_or_main_list
 
 router = Router()
 
+# callback_data смены дорожки: coneset:<workout_id>:<student_id>:<50|80|120>
+_CONE_SET_PREFIX = "coneset:{workout_id}:{student_id}:{{line}}"
 
-@router.callback_query(TrickAction.filter(F.action == "choose_cat"))
-async def process_choose_category(
-    callback: CallbackQuery, callback_data: TrickAction, session: AsyncSession
+
+async def _get_cone_line(state: FSMContext) -> str:
+    """Текущая дорожка из FSM (по умолчанию 80)."""
+    data = await state.get_data()
+    return data.get("cone_line", DEFAULT_CONE_LINE)
+
+
+async def _render_categories_screen(
+    message, session: AsyncSession, workout_id: int, student_id: int, cone_line: str
 ):
+    """Экран выбора категории + строка переключения дорожки."""
     categories = (
         (await session.execute(select(Trick.category).distinct())).scalars().all()
     )
+    kb = get_categories_kb(workout_id, student_id, list(categories))
+    rows = [
+        track_row_markup(
+            cone_line,
+            _CONE_SET_PREFIX.format(workout_id=workout_id, student_id=student_id),
+        )
+    ]
+    rows += list(kb.inline_keyboard)
 
-    await callback.message.edit_text(
-        "Выберите категорию трюка:",
-        reply_markup=get_categories_kb(
-            callback_data.workout_id, callback_data.student_id, list(categories)
-        ),
+    await message.edit_text(
+        f"Выберите категорию трюка.\n{cone_line_text(cone_line)}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
+
+
+@router.callback_query(TrickAction.filter(F.action == "choose_cat"))
+async def process_choose_category(
+    callback: CallbackQuery,
+    callback_data: TrickAction,
+    state: FSMContext,
+    session: AsyncSession,
+):
+    cone_line = await _get_cone_line(state)
+
+    await _render_categories_screen(
+        callback.message,
+        session,
+        callback_data.workout_id,
+        callback_data.student_id,
+        cone_line,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("coneset:"))
+async def process_cone_line_switch(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Смена дорожки прямо на экране категорий.
+    callback_data: coneset:<workout_id>:<student_id>:<50|80|120>"""
+    _, workout_id, student_id, cone_line = callback.data.split(":")
+    await state.update_data(cone_line=cone_line)
+
+    await _render_categories_screen(
+        callback.message, session, int(workout_id), int(student_id), cone_line
+    )
+    await callback.answer(f"Дорожка: {cone_line} см")
 
 
 @router.callback_query(TrickAction.filter(F.action == "choose_trick"))
 async def process_choose_trick(
-    callback: CallbackQuery, callback_data: TrickAction, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: TrickAction,
+    state: FSMContext,
+    session: AsyncSession,
 ):
     tricks = (
         (
@@ -58,40 +114,34 @@ async def process_choose_trick(
         .all()
     )
 
+    cone_line = await _get_cone_line(state)
+
     await callback.message.edit_text(
-        f"Категория: {callback_data.category.upper()}. Выберите трюк:",
+        f"Категория: {callback_data.category.upper()}.\n{cone_line_text(cone_line)}\n\n"
+        "Выберите трюк:",
         reply_markup=get_tricks_by_cat_kb(
             callback_data.workout_id, callback_data.student_id, list(tricks)
         ),
     )
+    await callback.answer()
 
 
 @router.callback_query(TrickAction.filter(F.action == "log_trick"))
-async def start_fsm_trick_params(
+async def start_fsm_trick_quantity(
     callback: CallbackQuery, callback_data: TrickAction, state: FSMContext
 ):
-    """Переходим в FSM, сохраняем контекст и запрашиваем дорожку"""
+    """Трюк выбран: запоминаем контекст и сразу запрашиваем количество конусов.
+    Дорожка берется из FSM (по умолчанию 80, меняется на экране категорий)."""
+    cone_line = await _get_cone_line(state)
     await state.update_data(
         workout_id=callback_data.workout_id,
         student_id=callback_data.student_id,
         trick_id=callback_data.trick_id,
+        cone_line=cone_line,
     )
 
     await callback.message.edit_text(
-        "Выберите размер дорожки (конусов):", reply_markup=get_track_coeff_kb()
-    )
-    await state.set_state(WorkoutCreationStates.waiting_for_track_coeff)
-
-
-@router.callback_query(
-    WorkoutCreationStates.waiting_for_track_coeff, F.data.startswith("cone_")
-)
-async def process_fsm_track_coeff(callback: CallbackQuery, state: FSMContext):
-    cone_size = callback.data.split("_")[1]  # Извлекаем "50", "80" или "120"
-    await state.update_data(cone_line=cone_size)
-
-    await callback.message.delete()
-    await callback.message.answer(
+        f"{cone_line_text(cone_line)}\n\n"
         "🔢 **Введите результаты выполнения**\n\n"
         "Отправьте количество конусов. Если нужно учесть чистоту/качество исполнения трюка, "
         "укажите через запятую поправку в процентах.\n\n"
@@ -99,10 +149,11 @@ async def process_fsm_track_coeff(callback: CallbackQuery, state: FSMContext):
         "• `9` [хорошее исполнение]\n"
         "• `8,-10` — штраф 10% за помарки и недачеты в технике\n"
         "• `11,20` — 20% бонус за идеальное исполнение трюка",
-        reply_markup=get_cancel_keyboard(),
+        reply_markup=None,
         parse_mode="Markdown",
     )
     await state.set_state(WorkoutCreationStates.waiting_for_quantity)
+    await callback.answer()
 
 
 @router.message(WorkoutCreationStates.waiting_for_quantity)
@@ -129,12 +180,11 @@ async def process_fsm_quantity_and_save(
     )
 
     data = await state.get_data()
-    await state.clear()  # Очищаем стейт FSM, возвращаемся в инлайн-меню
-
+    # cone_line НЕ сбрасываем: выбранная дорожка действует до следующей смены
     workout_id = data["workout_id"]
     student_id = data["student_id"]
     trick_id = data["trick_id"]
-    cone_line = data["cone_line"]
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
 
     student = await session.get(User, student_id)
     trick = await session.get(Trick, trick_id)
@@ -183,6 +233,7 @@ async def process_fsm_quantity_and_save(
 
     await message.answer(
         f"✅ Трюк <b>{trick.name}</b> успешно добавлен!\n\n"
+        f"📏 Дорожка: {cone_line} см\n"
         f"📊 **Параметры подхода:**\n"
         f"• Количество конусов: <code>{quantity}</code>\n"
         f"• Точность выполнения: <code>{accuracy_text}</code> (коэфф. {execution_multiplier:.2f})\n\n"
