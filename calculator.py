@@ -4,6 +4,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from models import Trick, LevelExperience, XpPenalty, TrickLog, User
 
+import math
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,13 +34,16 @@ async def calculate_single_trick(
     raw_points = trick.base_tech_points * line_coeff * execution_multiplier
 
     # этот бонус и для спорта, и для игры
-    # Бонус за превышение базового количества конусов (+5% за каждый конус сверху)
+    # Бонус за превышение базового количества конусов: +extra_bonus_pct × √(конусов сверх базы)
+    # (не линейно: каждый следующий конус дает меньше, чем предыдущий)
     # сознательно не делаем штравы на отклонения в меньшую сторону - там не все так просто.
     # в данный момент всё индивидуально. Как решит тренер, параметром  execution_multiplier
     bonus_multiplier = 1.0
     if quantity > trick.base_quantity:
         extra_cones = quantity - trick.base_quantity
-        bonus_pct = extra_cones * trick.extra_bonus_pct  # По умолчанию 0.05 (5%)
+        bonus_pct = (
+            math.sqrt(extra_cones) * trick.extra_bonus_pct
+        )  # По умолчанию 0.05 (5%)
         bonus_multiplier += bonus_pct
 
     calculated_points = raw_points * bonus_multiplier
@@ -95,24 +100,64 @@ async def calculate_current_workout_totals(
     }
     categories_count = len(unique_categories)
 
-    # --- Группировка логов: связка (общий combo_id) добавляет ОДИН доп. результат ---
-    # Шаги связки остаются в списке как обычные логи, но ДОПОЛНИТЕЛЬНО в список
-    # добавляется результат связки: последний combo_step, points = calculated_points + combo_bonus,
-    # xp = сумма XP всех шагов связки. Топ-8 (баллы) и топ-N (опыт) выбираются
-    # уже из этого расширенного списка, поэтому Result связки может попасть в топ.
+    # --- Группировка логов: связка (общий combo_id) дает ОДИН результат ---
+    # Логи, входящие в связку (combo_id не None и не '-'), НЕ считаются одиночными
+    # трюками и в results не попадают. Для каждой связки добавляется строго одна
+    # запись: балл последнего шага (шаги НЕ суммируются) и XP, привязанный к
+    # итоговому спортивному баллу связки.
     combo_steps = {}
     for log in trick_logs:
-        if log.combo_id:
+        if log.combo_id and log.combo_id != "-":
             combo_steps.setdefault(log.combo_id, []).append(log)
 
+    trick_by_id = {t.id: t for t in tricks_in_workout}
+
     # Единый список результатов: (points, xp)
-    results = [(log.calculated_points, log.calculated_xp) for log in trick_logs]
+    results = [
+        (log.calculated_points, log.calculated_xp)
+        for log in trick_logs
+        if not (log.combo_id and log.combo_id != "-")
+    ]
     for steps in combo_steps.values():
         steps.sort(key=lambda l: l.combo_step or 0)
-        last = steps[-1]
-        combo_points = last.calculated_points + (last.combo_bonus or 0.0)
-        combo_xp = sum(s.calculated_xp for s in steps)
-        results.append((combo_points, combo_xp))
+        # Балл связки = Result последнего шага (calculate_combo_step), шаги не суммируются
+        combo_points = steps[0].calculated_points
+        for next_log in steps[1:]:
+            combo_points = calculate_combo_step(
+                combo_points, next_log.calculated_points, db_session
+            )
+        combo_points = round(combo_points, 2)
+
+        # XP связки привязан к ее итоговому спортивному баллу:
+        # combo_xp = points * (sum(base_xp) / sum(base_tech_points)) * кол-во трюков
+        sum_base_xp = sum(
+            trick_by_id[s.trick_id].base_xp for s in steps if s.trick_id in trick_by_id
+        )
+        sum_base_tech = sum(
+            trick_by_id[s.trick_id].base_tech_points
+            for s in steps
+            if s.trick_id in trick_by_id
+        )
+        raw_combo_xp = (
+            combo_points
+            * (sum_base_xp / sum_base_tech if sum_base_tech else 0.0)
+            * len(steps)
+        )
+
+        # Штраф XP за уровень: используем тир самого "дорогого" (последнего) трюка связки
+        last_trick = trick_by_id.get(steps[-1].trick_id)
+        xp_multiplier = 1.0
+        if last_trick:
+            level_diff = skater.level - last_trick.trick_tier
+            if level_diff > 0:
+                penalty = await db_session.scalar(
+                    select(XpPenalty).where(XpPenalty.level_difference == level_diff)
+                )
+                if penalty:
+                    xp_multiplier = penalty.xp_multiplier
+
+        combo_xp = int(raw_combo_xp * xp_multiplier)
+        results.append((combo_points, max(0, combo_xp)))
 
     # --- 1. СПОРТИВНЫЙ РЕЖИМ (Расчет баллов) ---
     # Сортируем результаты по убыванию набранных баллов

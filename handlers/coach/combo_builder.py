@@ -15,6 +15,7 @@
 
 import uuid
 import logging
+import math
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
@@ -189,7 +190,8 @@ async def _pure_trick_points(
 
     raw = trick.base_tech_points * line_coeff * execution_multiplier
     if quantity > trick.base_quantity:
-        raw *= 1.0 + (quantity - trick.base_quantity) * trick.extra_bonus_pct
+        # бонус за конусы сверх базы: +extra_bonus_pct × √(конусов сверх базы) — как в calculator.py
+        raw *= 1.0 + math.sqrt(quantity - trick.base_quantity) * trick.extra_bonus_pct
     return round(raw, 2)
 
 

@@ -27,6 +27,7 @@ from handlers.coach.helpers import (
 )
 from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_markup
 from states.coach_states import WorkoutCreationStates
+from states.workout_states import CoachWorkoutStates
 from handlers.coach.workout import show_skater_card_or_main_list
 
 router = Router()
@@ -230,6 +231,11 @@ async def process_fsm_quantity_and_save(
     )
 
     accuracy_text = format_accuracy_text(percentage_mod)
+
+    # Выходим из режима ожидания количества: иначе все следующие текстовые
+    # сообщения тренера (кнопки меню, «📊 Статистика» и т.д.) продолжают
+    # перехватываться этим хендлером как «количество конусов»
+    await state.set_state(CoachWorkoutStates.training_active)
 
     await message.answer(
         f"✅ Трюк <b>{trick.name}</b> успешно добавлен!\n\n"

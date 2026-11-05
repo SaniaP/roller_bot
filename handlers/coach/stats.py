@@ -178,12 +178,13 @@ def build_workout_log_text(
         parts.append("Трюки не записаны.")
         return "\n".join(parts)
 
-    # Определяем, какие трюки не попали в зачет (правила калькулятора)
+    # Определяем зачет по правилам калькулятора (в т.ч. результат связки как единое целое)
     notes, penalties = _workout_breakdown(logs, level_reqs)
     if penalties:
         parts.extend(f"<i>{p}</i>" for p in penalties)
 
-    # Группируем: связки (combo_id) блоками, одиночные трюки — списком
+    # Группируем: связки (combo_id) блоками, одиночные трюки — списком (порядок лога)
+    # Жирным выделяются очки результатов, пошедших в зачет спорта (топ-8 по очкам).
     combos: dict[str, list[tuple[TrickLog, Trick]]] = {}
     singles: list[tuple[TrickLog, Trick]] = []
     for pair in logs:
@@ -199,19 +200,19 @@ def build_workout_log_text(
             parts.append(f"Связка (id {cid[:8]}…):")
             for log, trick in sorted(steps, key=lambda p: p[0].combo_step or 0):
                 bonus = log.combo_bonus or 0.0
+                pts, suffix = _points_str(notes.get(log.id), log.calculated_points, 2)
                 line = (
                     f"   • шаг {log.combo_step}: {trick.name} — {log.quantity} кон. "
-                    f"({log.cone_line}) — {log.calculated_points:.2f} очк. + бонус {bonus:.2f}"
+                    f"({log.cone_line}) — {pts} очк. + бонус {bonus:.2f}{suffix}"
                 )
-                if notes.get(log.id) == "out":
-                    line = f"<s><i>{line}</i></s> 🚫"
                 parts.append(line)
             # Стоимость связки = Result последнего шага (шаги НЕ суммируются):
             # Result шага = calculated_points + combo_bonus этого шага
             last = max(steps, key=lambda p: p[0].combo_step or 0)[0]
             total = last.calculated_points + (last.combo_bonus or 0.0)
+            pts, suffix = _points_str(notes.get(last.id), total, 2)
             parts.append(
-                f"   ↳ Итог связки (Result последнего шага): <b>{total:.2f} очк.</b>"
+                f"   ↳ Итог связки (Result последнего шага): {pts} очк.{suffix}"
             )
 
     if singles:
@@ -220,20 +221,30 @@ def build_workout_log_text(
             mult_note = ""
             if log.execution_multiplier and log.execution_multiplier != 1.0:
                 mult_note = f" (качество ×{log.execution_multiplier:.2f})"
+            pts, suffix = _points_str(notes.get(log.id), log.calculated_points, 1)
             line = (
                 f" • {trick.name}: {log.quantity} кон. (дорожка {log.cone_line}){mult_note} — "
-                f"{log.calculated_points:.1f} очк., +{log.calculated_xp} XP"
+                f"{pts} очк., +{log.calculated_xp} XP{suffix}"
             )
-            note = notes.get(log.id)
-            if note == "out":
-                line = f"<s><i>{line}</i></s> 🚫 не в зачет"
-            elif note == "sport":
-                line += " 🚫 не в зачет спорта"
-            elif note == "game":
-                line += " 🚫 не в зачет XP"
             parts.append(line)
 
     return fit_telegram_text("\n".join(parts))
+
+
+def _points_str(note: str | None, points: float, prec: int) -> tuple[str, str]:
+    """Форматирует очки: жирным — если результат в зачете спорта (топ-8 по очкам).
+    Возвращает (строка очков, суффикс-пометка)."""
+    val = f"{points:.{prec}f}"
+    if note in ("ok", "sport"):
+        val = f"<b>{val}</b>"
+    suffix = ""
+    if note == "out":
+        suffix = " 🚫 не в зачет"
+    elif note == "sport":
+        suffix = " 🚫 не в зачет опыта"
+    elif note == "game":
+        suffix = " 🚫 не в зачет очков"
+    return val, suffix
 
 
 def _workout_breakdown(
@@ -251,37 +262,56 @@ def _workout_breakdown(
     max_logs = level_reqs.max_workout_logs if level_reqs else 10
     min_categories = level_reqs.min_trick_categories if level_reqs else 3
 
-    # Зачет спорта: топ-8 по очкам
-    top8_ids = {
-        log.id
-        for log, _ in sorted(pairs, key=lambda p: p[0].calculated_points, reverse=True)[
-            :8
-        ]
-    }
-    # Зачет игры: топ max_workout_logs по XP
-    top_xp_ids = {
-        log.id
-        for log, _ in sorted(pairs, key=lambda p: p[0].calculated_xp, reverse=True)[
-            :max_logs
-        ]
-    }
+    # Полностью повторяем логику calculator.py: шаги связок идут в списке как
+    # обычные логи, ПОМИМО этого добавляется ОДИН результат связки
+    # (points = Result последнего шага, xp = сумма XP всех шагов).
+    # Топ-8 (очки) и топ-N (опыт) выбираются из этого расширенного списка.
+    combo_steps: dict[str, list[TrickLog]] = {}
+    for log, _t in pairs:
+        if log.combo_id:
+            combo_steps.setdefault(log.combo_id, []).append(log)
+
+    # Запись расширенного списка: (points, xp, log_ids очков, log_ids опыта)
+    results: list[tuple[float, int, list[int], list[int]]] = []
+    for log, _t in pairs:
+        results.append((log.calculated_points, log.calculated_xp, [log.id], [log.id]))
+    for cid, steps in combo_steps.items():
+        steps.sort(key=lambda l: l.combo_step or 0)
+        last = steps[-1]
+        combo_points = last.calculated_points + (last.combo_bonus or 0.0)
+        combo_xp = sum(s.calculated_xp for s in steps)
+        # очки связки «сидят» на последнем шаге, опыт — на всех шагах
+        results.append((combo_points, combo_xp, [last.id], [s.id for s in steps]))
+
+    # Зачет спорта: топ-8 результатов по очкам
+    in_sport_ids: set[int] = set()
+    for _p, _x, p_ids, _xp_ids in sorted(results, key=lambda r: r[0], reverse=True)[:8]:
+        in_sport_ids.update(p_ids)
+    # Зачет игры: топ max_workout_logs результатов по XP
+    in_game_ids: set[int] = set()
+    for _p, _x, _p_ids, xp_ids in sorted(results, key=lambda r: r[1], reverse=True)[
+        :max_logs
+    ]:
+        in_game_ids.update(xp_ids)
 
     notes: dict[int, str] = {}
     for log, _trick in pairs:
-        in_sport = log.id in top8_ids
-        in_game = log.id in top_xp_ids
-        if not in_sport and not in_game:
+        in_sport = log.id in in_sport_ids
+        in_game = log.id in in_game_ids
+        if in_sport and in_game:
+            notes[log.id] = "ok"  # в зачете и очков, и опыта
+        elif in_sport:
+            notes[log.id] = "sport"  # в зачете очков, но не опыта
+        elif in_game:
+            notes[log.id] = "game"  # в зачете опыта, но не очков
+        else:
             notes[log.id] = "out"  # полностью вне зачета
-        elif not in_sport:
-            notes[log.id] = "sport"  # не в зачете спорта, но в зачете игры
-        elif not in_game:
-            notes[log.id] = "game"  # не в зачете игры, но в зачете спорта
 
     penalties: list[str] = []
     if pairs:
         categories_count = len({trick.category for _log, trick in pairs})
-        if len(top8_ids) < 8:
-            missing_tricks = 8 - len(top8_ids)
+        if len(results) < 8:
+            missing_tricks = 8 - len(results)
             penalties.append(
                 f"⚠️ Штраф за недобор трюков: -{missing_tricks * 3.0:.1f} очков ({missing_tricks} × 3.0)"
             )

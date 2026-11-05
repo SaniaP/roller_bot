@@ -63,7 +63,7 @@ class XpPenalty(Base):
     xp_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
 
 
-class ComboBonus(Base):
+class ComboBonus(Base): #удалить 
     """Справочник бонусов за связку (комбо).
     bonus_table: округленная разница баллов двух соседних трюков (от -9 до 10)
     bonus_value: добавка к среднему баллу пары по таблице"""
