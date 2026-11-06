@@ -28,21 +28,24 @@ async def main():
     )
     #sys.stdout.reconfigure(encoding="utf-8", errors="replace") убрать?
 
-    logger = logging.getLogger("db_check")
+
 
     from pathlib import Path
 
     db_path = engine.url.database
     
-    # Заменяем print на logger.info
-    logger.info(f"Адрес подключения: {engine.url}")
-    logger.info(f"Путь к файлу: {db_path}")
+    logger = logging.getLogger("db_init")
 
-    if db_path:
-        path = Path(db_path)
-        logger.info(f"Файл существует: {path.is_file()}")
-        if path.is_file():
-            logger.info(f"Размер файла: {path.stat().st_size} байт")
+    if not db_path or not Path(db_path).is_file():
+        logger.critical(f"❌ Файл базы не найден по пути: {db_path}. Запуск остановлен!")
+        raise FileNotFoundError(
+            f"Файл базы не найден: {db_path}. "
+            "Запуск остановлен, чтобы не создать пустую базу."
+        )
+
+    # Заменяем print на logger.info
+    logger.info(f"💾 Используем базу: {db_path}")
+    logger.info(f"📊 Размер базы: {Path(db_path).stat().st_size} байт")
 
 
 
