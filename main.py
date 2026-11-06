@@ -28,6 +28,25 @@ async def main():
     )
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+
+    from pathlib import Path
+
+    db_path = engine.url.database
+    print("Адрес подключения:", engine.url, flush=True)
+    print("Путь к файлу:", db_path, flush=True)
+
+    if db_path:
+        path = Path(db_path)
+        print("Файл существует:", path.is_file(), flush=True)
+        if path.is_file():
+            print(
+                "Размер файла:", path.stat().st_size, "байт",
+                flush=True,
+            )
+
+
+
+
     #  СИНХРОНИЗАЦИЯ СТРУКТУРЫ БД 
     # Проверяем, появились ли в models.py новые таблицы. 
     # Если появились — бот аккуратно достроит их, не трогая старые данные.
