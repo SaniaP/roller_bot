@@ -6,11 +6,8 @@ DATABASE_URL = "sqlite+aiosqlite:////data/roller_school.db"
 # Создаем асинхронный движок. echo=True заставит Python выводить все SQL-запросы в консоль.
 
 
-#тоже временно!!
-engine = create_async_engine(DATABASE_URL, echo=True)
-import logging
-logger = logging.getLogger("db_config")
-logger.info(f"DB-CONFIG-V2 Инициализация движка. Файл: {__file__} | URL: {engine.url}")
+engine = create_async_engine(DATABASE_URL, echo=False)
+
 
 
 # Фабрика сессий. Через сессии мы будем делать запросы к БД (добавлять, обновлять, читать)

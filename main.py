@@ -29,27 +29,6 @@ async def main():
     #sys.stdout.reconfigure(encoding="utf-8", errors="replace") убрать?
 
 
-
-    from pathlib import Path
-
-    db_path = engine.url.database
-    
-    logger = logging.getLogger("db_init")
-
-    if not db_path or not Path(db_path).is_file():
-        logger.critical(f"❌ Файл базы не найден по пути: {db_path}. Запуск остановлен!")
-        raise FileNotFoundError(
-            f"Файл базы не найден: {db_path}. "
-            "Запуск остановлен, чтобы не создать пустую базу."
-        )
-
-    # Заменяем print на logger.info
-    logger.info(f"💾 Используем базу: {db_path}")
-    logger.info(f"📊 Размер базы: {Path(db_path).stat().st_size} байт")
-
-
-
-
     #  СИНХРОНИЗАЦИЯ СТРУКТУРЫ БД 
     # Проверяем, появились ли в models.py новые таблицы. 
     # Если появились — бот аккуратно достроит их, не трогая старые данные.
