@@ -18,7 +18,7 @@ async def calculate_single_trick(
     db_session,
 ) -> Tuple[float, int]:
     """
-    Рассчитывает спортивные баллы (points) и игровой опыт (XP) за ОДИН подход трюка.
+    Рассчитывает спортивные баллы (points) и игровой опыт (EXP) за ОДИН подход трюка.
     """
     # 1. Выбираем коэффициент дорожки
     line_coeff = 1.0
@@ -48,7 +48,7 @@ async def calculate_single_trick(
 
     calculated_points = raw_points * bonus_multiplier
 
-    # 3. Расчет игрового опыта (XP)
+    # 3. Расчет игрового опыта (EXP)
     raw_xp = (
         trick.base_xp * line_coeff * quantity * execution_multiplier * bonus_multiplier
     )
@@ -103,7 +103,7 @@ async def calculate_current_workout_totals(
     # --- Группировка логов: связка (общий combo_id) дает ОДИН результат ---
     # Логи, входящие в связку (combo_id не None и не '-'), НЕ считаются одиночными
     # трюками и в results не попадают. Для каждой связки добавляется строго одна
-    # запись: балл последнего шага (шаги НЕ суммируются) и XP, привязанный к
+    # запись: балл последнего шага (шаги НЕ суммируются) и EXP, привязанный к
     # итоговому спортивному баллу связки.
     combo_steps = {}
     for log in trick_logs:
@@ -112,12 +112,16 @@ async def calculate_current_workout_totals(
 
     trick_by_id = {t.id: t for t in tricks_in_workout}
 
-    # Единый список результатов: (points, xp)
-    results = [
+    # 1. Для СПОРТА: сюда идут вообще все выполненные подходы (включая шаги связок)
+    sport_results = [(log.calculated_points, log.calculated_xp) for log in trick_logs]
+
+    # 2. Для ОПЫТА: сюда идут только одиночные трюки ()
+    xp_results = [
         (log.calculated_points, log.calculated_xp)
         for log in trick_logs
         if not (log.combo_id and log.combo_id != "-")
     ]
+
     for steps in combo_steps.values():
         steps.sort(key=lambda l: l.combo_step or 0)
         # Балл связки = Result последнего шага (calculate_combo_step), шаги не суммируются
@@ -128,23 +132,31 @@ async def calculate_current_workout_totals(
             )
         combo_points = round(combo_points, 2)
 
-        # XP связки привязан к ее итоговому спортивному баллу:
-        # combo_xp = points * (sum(base_xp) / sum(base_tech_points)) * кол-во трюков
-        sum_base_xp = sum(
-            trick_by_id[s.trick_id].base_xp for s in steps if s.trick_id in trick_by_id
-        )
-        sum_base_tech = sum(
-            trick_by_id[s.trick_id].base_tech_points
-            for s in steps
-            if s.trick_id in trick_by_id
-        )
-        raw_combo_xp = (
-            combo_points
-            * (sum_base_xp / sum_base_tech if sum_base_tech else 0.0)
-            * len(steps)
-        )
+        # 1. Безопасно собираем базовые очки из кэша (если трюка почему-то нет в trick_by_id, берем его чистый балл из лога)
+        sum_base_xp = 0
+        sum_base_tech = 0
 
-        # Штраф XP за уровень: используем тир самого "дорогого" (последнего) трюка связки
+        for s in steps:
+            trick = trick_by_id.get(s.trick_id)
+            if trick:
+                sum_base_xp += trick.base_xp
+                sum_base_tech += trick.base_tech_points
+            else:
+                # Резервный вариант на случай, если трюк выпал из кэша запроса БД
+                # Опыт и баллы берем из самого лога как базовое соотношение
+                sum_base_xp += s.calculated_xp
+                sum_base_tech += s.calculated_points
+
+        # 2. Считаем динамическую пропорцию
+        base_ratio = sum_base_xp / sum_base_tech if sum_base_tech else 1.0
+     
+        # 3. Считаем среднее количество конусов
+        avg_quantity = sum(s.quantity for s in steps) / len(steps) if steps else 0
+
+        # 4. Считаем чистый опыт связки по нашей формуле
+        raw_combo_xp = combo_points * base_ratio * avg_quantity * 1.5
+
+        # 3. Применяем штраф за уровень (остается как был)
         last_trick = trick_by_id.get(steps[-1].trick_id)
         xp_multiplier = 1.0
         if last_trick:
@@ -156,12 +168,14 @@ async def calculate_current_workout_totals(
                 if penalty:
                     xp_multiplier = penalty.xp_multiplier
 
+        # Округляем итоговый опыт и добавляем строго одну запись в результаты
         combo_xp = int(raw_combo_xp * xp_multiplier)
-        results.append((combo_points, max(0, combo_xp)))
+        sport_results.append((combo_points, combo_xp))
+        xp_results.append((combo_points, max(0, combo_xp)))
 
     # --- 1. СПОРТИВНЫЙ РЕЖИМ (Расчет баллов) ---
     # Сортируем результаты по убыванию набранных баллов
-    sorted_by_points = sorted(results, key=lambda r: r[0], reverse=True)
+    sorted_by_points = sorted(sport_results, key=lambda r: r[0], reverse=True)
 
     # Выбираем до 8 лучших трюков/связок
     top_8 = sorted_by_points[:8]
@@ -184,10 +198,10 @@ async def calculate_current_workout_totals(
         final_sport_score = round(avg_points, 2)
     else:
         final_sport_score = 0.0
-
+    print(f"DEBUG: Весь список xp_results перед сортировкой: {xp_results}")
     # --- 2. ИГРОВОЙ РЕЖИМ (Расчет опыта) ---
     # Сортируем результаты по убыванию набранного опыта
-    sorted_by_xp = sorted(results, key=lambda r: r[1], reverse=True)
+    sorted_by_xp = sorted(xp_results, key=lambda r: r[1], reverse=True)
 
     # В зачет опыта идет не более max_workout_logs лучших трюков/связок
     top_xp = sorted_by_xp[:max_logs_for_xp]

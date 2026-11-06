@@ -12,7 +12,7 @@ from models import TrickLog, User
 async def main():
     async with async_session() as session:
         logs = (
-            await session.scalars(select(TrickLog).where(TrickLog.workout_id == 50))
+            await session.scalars(select(TrickLog).where(TrickLog.workout_id == 1))
         ).all()
         # группируем по ученику
         by_student = {}

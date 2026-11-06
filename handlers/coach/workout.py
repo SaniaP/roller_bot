@@ -1,4 +1,4 @@
-"""Логика тренировки: старт/продолжение, добавление спортсменов, карточка, финализация."""
+﻿"""Логика тренировки: старт/продолжение, добавление спортсменов, карточка, финализация."""
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -172,10 +172,10 @@ async def show_skater_card_or_main_list(
     card_text = (
         f"👤 **Спортсмен:** {student.full_name}\n"
         f"🎮 **Ранг:** {student.title} (Уровень: {student.level})\n"
-        f"✨ **Текущий опыт:** {student.xp} XP\n\n"
+        f"✨ **Текущий опыт:** {student.xp} EXP\n\n"
         f"📊 **Предварительные итоги сессии:**\n"
         f" — Средний спортивный балл: <b>{current_sport_score}</b>\n"
-        f" — Набрано опыта за сегодня: <b>+{current_xp_gain} XP</b>"
+        f" — Набрано опыта за сегодня: <b>+{current_xp_gain} EXP</b>"
     )
 
     await callback.message.edit_text(
@@ -255,7 +255,7 @@ async def process_finish_workout(
 
         summary_report += (
             f"🏃‍♂️ {student.full_name}:\n"
-            f"Score: {final_sport_score} | XP: +{final_xp_gain}{lvl_up_text}\n\n"
+            f"Score: {final_sport_score} | EXP: +{final_xp_gain}{lvl_up_text}\n\n"
         )
 
     # Закрываем тренировку

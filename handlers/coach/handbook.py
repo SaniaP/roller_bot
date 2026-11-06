@@ -1,4 +1,4 @@
-"""Справочник трюков (только просмотр)."""
+﻿"""Справочник трюков (только просмотр)."""
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -86,7 +86,7 @@ async def show_handbook_trick_details(
         f"📏 Коэфф. дорожки 80 см: {trick.coeff_80}\n"
         f"📏 Коэфф. дорожки 120 см: {trick.coeff_120}\n\n"
         f"⭐ Базовые баллы: {trick.base_tech_points}\n"
-        f"✨ Базовый опыт: {trick.base_xp} XP\n"
+        f"✨ Базовый опыт: {trick.base_xp} EXP\n"
         f"➕ Бонус за конус свыше базы: +{int(trick.extra_bonus_pct * 100)}%"
     )
 

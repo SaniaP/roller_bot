@@ -1,4 +1,4 @@
-"""Пошаговый FSM-конструктор комбо-связок в одном сообщении.
+﻿"""Пошаговый FSM-конструктор комбо-связок в одном сообщении.
 
 Общий для тренера и ученика: различие только в флаге needs_review
 (трюки, отправленные учеником самостоятельно, ждут подтверждения).
@@ -58,7 +58,7 @@ async def _restore_menu_after_combo(
     from keyboards.skater_kb import get_student_training_menu
 
     if saver and saver.id == student_id and saver.role == "student":
-        # Ожидаемое начисление по связке: Result последнего шага и сумма XP всех шагов
+        # Ожидаемое начисление по связке: Result последнего шага и сумма EXP всех шагов
         items = data.get("combo_items") or []
         combo_points = 0.0
         combo_xp = 0
@@ -78,8 +78,8 @@ async def _restore_menu_after_combo(
             "🧩 Связка отправлена тренеру на проверку!\n\n"
             f"📊 **Ожидаемое начисление:**\n"
             f"• Баллы: +{round(combo_points, 2)}\n"
-            f"• Опыт: +{combo_xp} XP\n\n"
-            "⏳ Очки и XP засчитаются после подтверждения тренером.",
+            f"• Опыт: +{combo_xp} EXP\n\n"
+            "⏳ Очки и EXP засчитаются после подтверждения тренером.",
             reply_markup=get_student_training_menu(),
         )
     else:
@@ -172,7 +172,7 @@ def _combo_tricks_kb(workout_id, student_id, category, tricks):
 
 
 # ---------------------------------------------------------------------
-# Расчет чистого балла трюка связки (без XP — XP считаем отдельно)
+# Расчет чистого балла трюка связки (без EXP — EXP считаем отдельно)
 # ---------------------------------------------------------------------
 
 
@@ -339,7 +339,7 @@ async def combo_first_quantity(
     trick = await session.get(Trick, data["combo_trick_id"])
     student = await session.get(User, data["combo_student_id"])
 
-    # XP первого шага считаем тем же механизмом, что и при сохранении связки
+    # EXP первого шага считаем тем же механизмом, что и при сохранении связки
     _, xp = await calculate_single_trick(
         trick=trick,
         cone_line=data["combo_cone"],
@@ -426,11 +426,20 @@ async def combo_add_step(
     data = await state.get_data()
     cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
     await state.set_state(ComboBuilderStates.choosing_next_trick)
+
+    # Ряд выбора дорожки — как при добавлении одиночного трюка / первого трюка связки
+    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+    kb = _combo_categories_kb(
+        data["combo_workout_id"], data["combo_student_id"], list(cats)
+    )
+    rows = [track_row_markup(cone_line, "cmb_coneset:{line}")]
+    rows += list(kb.inline_keyboard)
+
     await callback.message.edit_text(
+        f"🧩 <b>Конструктор связки</b>\n\n{cone_line_text(cone_line)}\n\n"
         "Выберите категорию следующего трюка связки:",
-        reply_markup=_combo_categories_kb(
-            data["combo_workout_id"], data["combo_student_id"], list(cats)
-        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -466,17 +475,53 @@ async def combo_next_cat(
     ComboBuilderStates.choosing_next_trick, ComboAction.filter(F.action == "combo_back")
 )
 async def combo_back_to_categories(
-    callback: CallbackQuery, callback_data: ComboAction, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: ComboAction,
+    state: FSMContext,
+    session: AsyncSession,
 ):
     """Кнопка «⬅️ К категориям» на этапе выбора следующего трюка связки"""
     cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
+    cone_line = (await state.get_data()).get("cone_line", DEFAULT_CONE_LINE)
+    kb = _combo_categories_kb(
+        callback_data.workout_id, callback_data.student_id, list(cats)
+    )
+    rows = [track_row_markup(cone_line, "cmb_coneset:{line}")]
+    rows += list(kb.inline_keyboard)
     await callback.message.edit_text(
+        f"🧩 <b>Конструктор связки</b>\n\n{cone_line_text(cone_line)}\n\n"
         "Выберите категорию следующего трюка связки:",
-        reply_markup=_combo_categories_kb(
-            callback_data.workout_id, callback_data.student_id, list(cats)
-        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
     )
     await callback.answer()
+
+
+@router.callback_query(
+    ComboBuilderStates.choosing_next_trick, F.data.startswith("cmb_coneset:")
+)
+async def combo_next_switch_cone_line(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Смена дорожки на этапе выбора следующего трюка (шаг 2+) связки."""
+    cone_line = callback.data.split(":")[1]
+    await state.update_data(cone_line=cone_line)
+
+    cats = (await session.execute(select(Trick.category).distinct())).scalars().all()
+    data = await state.get_data()
+    kb = _combo_categories_kb(
+        data.get("combo_workout_id", 0), data.get("combo_student_id", 0), list(cats)
+    )
+    rows = [track_row_markup(cone_line, "cmb_coneset:{line}")]
+    rows += list(kb.inline_keyboard)
+
+    await callback.message.edit_text(
+        f"🧩 <b>Конструктор связки</b>\n\n{cone_line_text(cone_line)}\n\n"
+        "Выберите категорию следующего трюка связки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await callback.answer(f"Дорожка: {cone_line} см")
 
 
 @router.callback_query(
@@ -517,7 +562,7 @@ async def combo_next_quantity(
     student = await session.get(User, data["combo_student_id"])
     prev_result = data["combo_prev_result"]
 
-    # XP шага считаем тем же механизмом, что и при сохранении связки
+    # EXP шага считаем тем же механизмом, что и при сохранении связки
     _, xp = await calculate_single_trick(
         trick=trick,
         cone_line=data["combo_cone"],
@@ -596,7 +641,7 @@ async def combo_save(
 
     saved = 0
     for step, it in enumerate(items, start=1):
-        # XP считаем обычным механизмом одиночного трюка
+        # EXP считаем обычным механизмом одиночного трюка
         _, xp = await calculate_single_trick(
             trick=await session.get(Trick, it["trick_id"]),
             cone_line=it["cone_line"],

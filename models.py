@@ -63,17 +63,6 @@ class XpPenalty(Base):
     xp_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
 
 
-class ComboBonus(Base): #удалить 
-    """Справочник бонусов за связку (комбо).
-    bonus_table: округленная разница баллов двух соседних трюков (от -9 до 10)
-    bonus_value: добавка к среднему баллу пары по таблице"""
-
-    __tablename__ = "combo_bonuses"
-
-    bonus_table: Mapped[int] = mapped_column(Integer, primary_key=True)
-    bonus_value: Mapped[float] = mapped_column(Float, default=0.0)
-
-
 class Trick(Base):
     """Справочник трюков"""
 

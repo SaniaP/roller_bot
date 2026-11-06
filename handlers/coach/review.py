@@ -1,4 +1,4 @@
-"""Проверка самостоятельных трюков учеников (needs_review)."""
+﻿"""Проверка самостоятельных трюков учеников (needs_review)."""
 
 import re
 
@@ -155,7 +155,7 @@ async def _send_student_card(
 async def _confirm_logs(
     session: AsyncSession, logs: list[TrickLog], execution_multiplier: float = 1.0
 ):
-    """Подтверждает логи: устанавливает execution_multiplier и пересчитывает очки/XP.
+    """Подтверждает логи: устанавливает execution_multiplier и пересчитывает очки/EXP.
     Если среди логов есть связка (общий combo_id) — она пересчитывается ПОСЛЕДОВАТЕЛЬНО:
     сначала чистые баллы всех шагов с новой поправкой, затем combo_bonus каждого шага
     по формуле Result = f(prev_result, Y), т.к. каждый шаг зависит от предыдущего."""

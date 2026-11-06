@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import uuid
 from typing import Optional
 from aiogram import Router, F, types
@@ -301,7 +301,7 @@ async def student_save_final_trick(
     # Множитель по умолчанию равен 1.0 (чисто)
     execution_multiplier = 1.0
 
-    # Вызываем твой калькулятор (возвращает кортеж: (баллы, XP))
+    # Вызываем твой калькулятор (возвращает кортеж: (баллы, EXP))
     points_earned, xp_earned = await calculate_single_trick(
         trick=trick,
         cone_line=distance,
@@ -339,8 +339,8 @@ async def student_save_final_trick(
         f"🪚 Пройдено конусов: {cones_count} шт.\n\n"
         f"📊 **Ожидаемое начисление:**\n"
         f"• Баллы: +{points_earned}\n"
-        f"• Опыт: +{xp_earned} XP\n\n"
-        f"⏳ Очки и XP засчитаются после подтверждения тренером.",
+        f"• Опыт: +{xp_earned} EXP\n\n"
+        f"⏳ Очки и EXP засчитаются после подтверждения тренером.",
         reply_markup=get_student_training_menu(),
         parse_mode="Markdown",
     )
@@ -456,6 +456,14 @@ async def student_today_stats(
         ).all()
     }
 
+    # Стоимость связки = Result последнего шага; EXP — по формуле калькулятора
+    from handlers.coach.stats import _combo_exp_map
+
+    pairs = [
+        (log, tricks.get(log.trick_id)) for log in logs if log.combo_id
+    ]
+    combo_exp = await _combo_exp_map(pairs, user, session)
+
     items = _group_logs_by_combo(list(logs))
     lines = ["📊 Мои очки за сегодня:\n"]
     for item in items:
@@ -467,13 +475,13 @@ async def student_today_stats(
             )
             confirmed = all(not s.needs_review for s in steps)
             status = "✅ подтверждена" if confirmed else "⏳ на проверке"
-            # Стоимость связки = Result последнего шага, XP = сумма шагов
+            # Стоимость связки = Result последнего шага, EXP = сумма шагов
             last = max(steps, key=lambda s: s.combo_step or 0)
             combo_points = last.calculated_points + (last.combo_bonus or 0.0)
-            combo_xp = sum(s.calculated_xp for s in steps)
+            combo_xp = combo_exp.get(last.combo_id, 0)
             lines.append(
                 f"🧩 Связка: {names} — "
-                f"{round(combo_points, 2)} очков, +{combo_xp} XP — {status}"
+                f"{round(combo_points, 2)} очков, +{combo_xp} EXP — {status}"
             )
         else:
             log = item["log"]
@@ -482,7 +490,7 @@ async def student_today_stats(
             status = "✅ подтвержден" if not log.needs_review else "⏳ на проверке"
             lines.append(
                 f"🎯 {name}: {log.quantity} конусов, (дорожка {log.cone_line}) — "
-                f"{log.calculated_points} очков, +{log.calculated_xp} XP — {status}"
+                f"{log.calculated_points} очков, +{log.calculated_xp} EXP — {status}"
             )
 
     # Итог по подтвержденным: как в журнале тренировок (калькулятор итогов)
@@ -496,12 +504,12 @@ async def student_today_stats(
     if pending:
         lines.append(
             f"\n⏳ На проверке: {len(pending)} — очки засчитаются после подтверждения тренером.\n"
-            f"📊 Текущий результат (предварительно): {sport_score} очков, +{total_xp} XP"
+            f"📊 Текущий результат (предварительно): {sport_score} очков, +{total_xp} EXP"
         )
     else:
         lines.append(
             f"\n✅ Все отправленные трюки подтверждены тренером.\n"
-            f"📊 Итог тренировки: {sport_score} очков, +{total_xp} XP"
+            f"📊 Итог тренировки: {sport_score} очков, +{total_xp} EXP"
         )
 
     await message.answer(
