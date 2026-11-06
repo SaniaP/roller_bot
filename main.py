@@ -26,23 +26,23 @@ async def main():
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         stream=sys.stdout
     )
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    #sys.stdout.reconfigure(encoding="utf-8", errors="replace") убрать?
 
+    logger = logging.getLogger("db_check")
 
     from pathlib import Path
 
     db_path = engine.url.database
-    print("Адрес подключения:", engine.url, flush=True)
-    print("Путь к файлу:", db_path, flush=True)
+    
+    # Заменяем print на logger.info
+    logger.info(f"Адрес подключения: {engine.url}")
+    logger.info(f"Путь к файлу: {db_path}")
 
     if db_path:
         path = Path(db_path)
-        print("Файл существует:", path.is_file(), flush=True)
+        logger.info(f"Файл существует: {path.is_file()}")
         if path.is_file():
-            print(
-                "Размер файла:", path.stat().st_size, "байт",
-                flush=True,
-            )
+            logger.info(f"Размер файла: {path.stat().st_size} байт")
 
 
 
