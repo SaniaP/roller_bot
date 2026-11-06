@@ -6,7 +6,7 @@ DATABASE_URL = "sqlite+aiosqlite:////data/roller_school.db"
 # Создаем асинхронный движок. echo=True заставит Python выводить все SQL-запросы в консоль.
 
 
-#тоже временно!
+#тоже временно!!
 engine = create_async_engine(DATABASE_URL, echo=True)
 import logging
 logger = logging.getLogger("db_config")
