@@ -4,3 +4,8 @@ git remote add amvera git@git.msk1.amvera.ru:carson87x/roller-bot
 пуш на амверу
 git push amvera main:master
 
+
+пуш на ГИТ
+git push origin main
+
+последний тест!!!
