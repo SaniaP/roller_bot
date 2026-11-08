@@ -198,7 +198,7 @@ async def process_cancel_input(
     callback: CallbackQuery,
     callback_data: TrickAction,
     state: FSMContext,
-    session: AsyncSession, # Добавляем сессию для вызова карточки
+    session: AsyncSession,  # Добавляем сессию для вызова карточки
 ):
     """Явная кнопка «Отмена» (тренер и ученик)."""
     by_student = callback_data.by_student
@@ -208,39 +208,37 @@ async def process_cancel_input(
     # 1. Если отменяет УЧЕНИК
     if by_student:
         from keyboards.skater_kb import get_student_training_menu
-        
+
         # Сбрасываем состояние в активную тренировку ученика
         await state.clear()
         await state.set_state(StudentStates.training_active)
         await state.update_data(
             current_workout_id=workout_id,
         )
-        
+
         # Удаляем старое инлайн-сообщение ввода трюка
         try:
             await callback.message.delete()
         except Exception:
             pass
-            
+
         # Отправляем чистое Reply-меню активной тренировки
         await callback.message.answer(
-            "↩️ Ввод трюка отменен.",
-            reply_markup=get_student_training_menu()
+            "↩️ Ввод трюка отменен.", reply_markup=get_student_training_menu()
         )
 
     # 2. Если отменяет ТРЕНЕР
     else:
         # Очищаем состояние конструктора трюка
         await state.clear()
-        
+
         # Восстанавливаем данные в FSM тренера, чтобы карточка работала дальше
         await state.update_data(
-            current_workout_id=workout_id,
-            selected_student_id=student_id
+            current_workout_id=workout_id, selected_student_id=student_id
         )
-        
+
         from handlers.coach.workout import show_skater_card_or_main_list
-        
+
         try:
             await callback.answer("Действие отменено")
         except Exception:
@@ -260,19 +258,18 @@ async def process_cancel_input(
 
 @router.callback_query(
     StateFilter(
-        WorkoutCreationStates.waiting_for_quantity, 
-        StudentStates.waiting_for_cones
+        WorkoutCreationStates.waiting_for_quantity, StudentStates.waiting_for_cones
     )
 )
 async def cancel_input_on_other_action(
-    callback: CallbackQuery, 
+    callback: CallbackQuery,
     state: FSMContext,
-    session: AsyncSession  # Добавляем сессию для вызова карточки тренера
+    session: AsyncSession,  # Добавляем сессию для вызова карточки тренера
 ):
     """Предохранитель: сбрасывает ожидание текста при клике на любую инлайн-кнопку."""
     data = await state.get_data()
     by_student = data.get("by_student", False)
-    
+
     # Достаем сохраненные ID, чтобы знать, куда возвращать пользователя
     workout_id = data.get("current_workout_id") or data.get("workout_id")
     student_id = data.get("selected_student_id") or data.get("student_id")
@@ -280,19 +277,19 @@ async def cancel_input_on_other_action(
     # 1. ЕСЛИ ЭТО УЧЕНИК — гасим старое окно и возвращаем его Reply-меню
     if by_student:
         from keyboards.skater_kb import get_student_training_menu
-        
+
         await state.clear()
         await state.set_state(StudentStates.training_active)
         await state.update_data(current_workout_id=workout_id)
-        
+
         try:
             await callback.message.delete()
         except Exception:
             pass
-            
+
         await callback.message.answer(
             "↩️ Ввод количества конусов отменен.",
-            reply_markup=get_student_training_menu()
+            reply_markup=get_student_training_menu(),
         )
         await callback.answer("Ввод отменен")
 
@@ -300,14 +297,13 @@ async def cancel_input_on_other_action(
     else:
         await state.clear()
         await state.update_data(
-            current_workout_id=workout_id,
-            selected_student_id=student_id
+            current_workout_id=workout_id, selected_student_id=student_id
         )
-        
+
         from handlers.coach.workout import show_skater_card_or_main_list
-        
+
         await callback.answer("Ввод отменен")
-        
+
         # Заменяем текущее сообщение обратно на карточку
         await show_skater_card_or_main_list(
             callback,
@@ -474,3 +470,31 @@ def _student_training_menu():
     from keyboards.skater_kb import get_student_training_menu
 
     return get_student_training_menu()
+
+
+# =====================================================================
+# ОТМЕНА ОШИБОЧНО ВНЕСЕННОГО ТРЮКА (карточка спортсмена у тренера)
+# =====================================================================
+
+
+@router.callback_query(TrickAction.filter(F.action == "delete_log"))
+async def delete_last_trick_log(
+    callback: CallbackQuery, callback_data: TrickAction, session: AsyncSession
+):
+    """Отмена ошибочно внесенного трюка."""
+    from sqlalchemy import delete
+
+    from handlers.coach.workout import show_skater_card_or_main_list
+
+    await session.execute(delete(TrickLog).where(TrickLog.id == callback_data.log_id))
+    await session.commit()
+
+    await callback.answer("Последний трюк успешно отменен!", show_alert=True)
+
+    # Перерисовываем карточку
+    redirect_action = WorkoutAction(
+        action="select_skater",
+        workout_id=callback_data.workout_id,
+        student_id=callback_data.student_id,
+    )
+    await show_skater_card_or_main_list(callback, redirect_action, session)
