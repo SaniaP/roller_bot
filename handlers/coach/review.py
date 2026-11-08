@@ -349,9 +349,52 @@ async def review_show_student(
 
 @router.callback_query(ReviewAction.filter(F.action == "rv_edit_combo"))
 async def review_edit_combo(
-    callback: CallbackQuery, callback_data: ReviewAction, state: FSMContext
+    callback: CallbackQuery,
+    callback_data: ReviewAction,
+    session: AsyncSession,
+    state: FSMContext,
 ):
     """Тренер нажал на связку: подтверждаем все её шаги одной поправкой"""
+    # Состав связки для шапки: Название 12,80 -> Название 13,80
+    anchor_log = await session.get(TrickLog, callback_data.log_id)
+    combo_steps: list[TrickLog] = []
+    if anchor_log and anchor_log.combo_id:
+        combo_steps = list(
+            (
+                await session.execute(
+                    select(TrickLog).where(
+                        TrickLog.workout_id == callback_data.workout_id,
+                        TrickLog.student_id == callback_data.student_id,
+                        TrickLog.combo_id == anchor_log.combo_id,
+                        TrickLog.needs_review == True,  # noqa: E712
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        combo_steps.sort(key=lambda s: s.combo_step or 0)
+
+    combo_line = ""
+    if combo_steps:
+        trick_ids = {s.trick_id for s in combo_steps}
+        tricks = {
+            t.id: t
+            for t in (
+                await session.execute(select(Trick).where(Trick.id.in_(trick_ids)))
+            )
+            .scalars()
+            .all()
+        }
+        parts = []
+        for s in combo_steps:
+            tr = tricks.get(s.trick_id)
+            name = tr.name if tr else "?"
+            parts.append(f"{name} {s.quantity},{s.cone_line}")
+        combo_line = (
+            "🧩 <b>Состав связки:</b> <code>" + " -> ".join(parts) + "</code>\n\n"
+        )
+
     await state.update_data(
         review_workout_id=callback_data.workout_id,
         review_student_id=callback_data.student_id,
@@ -360,7 +403,8 @@ async def review_edit_combo(
     )
     await callback.message.edit_text(
         "🧩 <b>Подтверждение связки</b>\n\n"
-        "Каждый трюк связки подтверждается ОТДЕЛЬНО.\n"
+        + combo_line
+        + "Каждый трюк связки подтверждается ОТДЕЛЬНО.\n"
         "Введите поправки в процентах через пробел — по одной на каждый шаг связки, "
         "в порядке шагов.\n\n"
         "Пример для связки из 3 трюков: <code>0 10 -5</code>\n"

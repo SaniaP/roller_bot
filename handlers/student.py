@@ -126,7 +126,7 @@ async def student_process_pin(
     await message.answer(
         "✅ Вы успешно подключились к тренировке!\n\n"
         "Теперь вы можете самостоятельно отправлять выполненные трюки.\n"
-        "По умолчанию они запишутся с чистым выполнением (1.0).",
+        "Шнурки завязаны, бакли затянуты — погнали! 🚀",
         reply_markup=get_student_training_menu(),
     )
 
@@ -137,7 +137,7 @@ async def student_process_pin(
 
 
 @router.message(
-    StudentStates.training_active, F.text == "🛹 Отправить выполненный трюк"
+    StudentStates.training_active, F.text == "🛼 Отправить выполненный трюк"
 )
 async def show_categories_dynamic(
     message: Message, state: FSMContext, session: AsyncSession
@@ -459,9 +459,7 @@ async def student_today_stats(
     # Стоимость связки = Result последнего шага; EXP — по формуле калькулятора
     from handlers.coach.stats import _combo_exp_map
 
-    pairs = [
-        (log, tricks.get(log.trick_id)) for log in logs if log.combo_id
-    ]
+    pairs = [(log, tricks.get(log.trick_id)) for log in logs if log.combo_id]
     combo_exp = await _combo_exp_map(pairs, user, session)
 
     items = _group_logs_by_combo(list(logs))
@@ -553,7 +551,7 @@ async def student_show_handbook(message: Message, session: AsyncSession):
 # =====================================================================
 
 
-@router.message(F.text == "👤 Мой профиль (RPG)")
+@router.message(F.text == "👤 Мой персонаж")
 async def student_my_profile(message: Message, session: AsyncSession):
     """Профиль ученика: BP, прогресс-бар и разбивка по тренировкам"""
     user = (

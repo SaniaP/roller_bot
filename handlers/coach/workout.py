@@ -3,9 +3,11 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from models import User, Workout, WorkoutRegistration, TrickLog
 from states.workout_states import CoachWorkoutStates
@@ -21,6 +23,7 @@ from handlers.coach.helpers import (
     get_workout_students,
     new_workout_now,
 )
+from keyboards.skater_kb import get_student_main_menu
 
 router = Router()
 
@@ -61,6 +64,13 @@ async def coach_start_workout(
         f"Ученики будут появляться в вашем списке автоматически по мере ввода кода.",
         reply_markup=get_active_workout_kb(new_workout.id, []),
         parse_mode="Markdown",
+    )
+
+    # Обновляем reply-меню: пока тренировка открыта, кнопка должна называться
+    # «Продолжить тренировку», а не «Начать тренировку»
+    await message.answer(
+        "🏋️ Тренировка активна.",
+        reply_markup=await get_coach_menu_for(session),
     )
 
 
@@ -191,7 +201,10 @@ async def show_skater_card_or_main_list(
 
 @router.callback_query(WorkoutAction.filter(F.action == "finish_workout"))
 async def process_finish_workout(
-    callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: WorkoutAction,
+    state: FSMContext,
+    session: AsyncSession,
 ):
     workout_id = callback_data.workout_id
     workout = await session.get(Workout, workout_id)
@@ -200,7 +213,7 @@ async def process_finish_workout(
         await callback.answer("Ошибка: Тренировка не найдена", show_alert=True)
         return
 
-    # Извлекаем все регистрации на эту тренировку
+    # 1. Извлекаем все регистрации на эту тренировку
     registrations = (
         (
             await session.execute(
@@ -213,27 +226,59 @@ async def process_finish_workout(
         .all()
     )
 
+    if not registrations:
+        # Если на тренировку никто не записался, просто закрываем её
+        workout.status = "closed"
+        await session.commit()
+        await state.clear()
+        await callback.message.delete()
+        await callback.message.answer(
+            "🏁 Тренировка завершена (учеников не было).", 
+            reply_markup=await get_coach_menu_for(session)
+        )
+        return
+
+    # Собираем все уникальные student_id, которые есть на тренировке
+    student_ids = list({reg.student_id for reg in registrations})
+
+    # 2. Загружаем ВСЕХ нужных учеников ОДНИМ запросом через IN
+    students_result = await session.execute(
+        select(User).where(User.id.in_(student_ids))
+    )
+    # Создаем словарь {id_ученика: объект_User} для моментального поиска в памяти
+    students_dict = {user.id: user for user in students_result.scalars().all()}
+
+    # 3. Загружаем ВСЕ логи трюков для этой тренировки ОДНИМ запросом
+    all_logs = (
+        (
+            await session.execute(
+                select(TrickLog).where(TrickLog.workout_id == workout_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Группируем логи по student_id в оперативной памяти
+    logs_by_student = {}
+    for log in all_logs:
+        logs_by_student.setdefault(log.student_id, []).append(log)
+
     summary_report = "🏁 ТРЕНИРОВКА ЗАВЕРШЕНА И ПОСЧИТАНА!\n\n"
+    bot_id = callback.bot.id
 
     for reg in registrations:
-        student = await session.get(User, reg.student_id)
+        # Достаем ученика из созданного словаря без запроса к БД
+        student = students_dict.get(reg.student_id)
+        if not student:
+            continue
 
-        logs = (
-            (
-                await session.execute(
-                    select(TrickLog).where(
-                        TrickLog.workout_id == workout_id,
-                        TrickLog.student_id == student.id,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
+        # Достаем логи ученика из словаря
+        student_logs = logs_by_student.get(student.id, [])
 
         # Считаем финальные итоги через калькулятор
         final_sport_score, final_xp_gain = await calculate_current_workout_totals(
-            list(logs), student, session
+            student_logs, student, session
         )
 
         # Обновляем регистрационную запись тренировки
@@ -258,9 +303,39 @@ async def process_finish_workout(
             f"Score: {final_sport_score} | EXP: +{final_xp_gain}{lvl_up_text}\n\n"
         )
 
-    # Закрываем тренировку
+    # Закрываем тренировку и сохраняем все изменения одним пакетом
     workout.status = "closed"
     await session.commit()
+
+    # Уведомляем всех записанных учеников и возвращаем их в главное меню
+    for reg in registrations:
+        student = students_dict.get(reg.student_id)
+        if not student or not student.telegram_id:
+            continue
+            
+        # Исправленный StorageKey (bot_id вместо bot)
+        student_state = FSMContext(
+            storage=state.storage,
+            key=StorageKey(
+                bot_id=bot_id,
+                chat_id=student.telegram_id,
+                user_id=student.telegram_id,
+            ),
+        )
+        await student_state.clear()
+        try:
+            await callback.bot.send_message(
+                student.telegram_id,
+                "🏁 Тренировка завершена тренером.\n"
+                f"Ваш итог: {reg.training_points} очков, +{reg.training_xp} EXP.",
+                reply_markup=get_student_main_menu(),
+            )
+        except Exception:
+            # Ученик мог заблокировать бота — не прерываем закрытие тренировки
+            pass
+
+    # Сбрасываем FSM тренера и возвращаем его в главное меню
+    await state.clear()
 
     await callback.message.delete()
     await callback.message.answer(

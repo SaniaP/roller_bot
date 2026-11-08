@@ -154,18 +154,30 @@ async def _best_training_points(session: AsyncSession, student_id: int) -> float
 
 
 async def _progress_line(student: User, session: AsyncSession) -> str:
-    """Строка: имя — уровень, BP : лучший training_points; ниже голый бар прогресса опыта"""
+    """Строка: имя — уровень, Лучший результат; ниже голый бар прогресса опыта.
+    Используется сквозным образом в интерфейсе тренера и студента."""
     best_points = await _best_training_points(session, student.id)
-    bp = f"{best_points:.1f}" if best_points is not None else "—"
-    header = f"👤 <b>{student.full_name}</b> - {student.level} LVL, BP : {bp}"
+    bp = f"{best_points:.1f} очк." if best_points is not None else "—"
+
+    # Строка 1: Имя и Уровень
+    line_name_lvl = f"👤 <b>{student.full_name}</b> — {student.level} Уровень"
+    # Строка 2: Лучший технический показатель (BP)
+    line_bp = f"🏆 Лучший результат: {bp}"
 
     next_reqs = await session.get(LevelExperience, student.level + 1)
     if not next_reqs:
-        return f"{header}\n🏆 Максимальный уровень достигнут!"
+        # Если уровень максимальный, выводим имя, рекорд и плашку максимума
+        return f"{line_name_lvl}\n{line_bp}\n✨ Максимальный уровень достигнут!"
+
     cur_reqs = await session.get(LevelExperience, student.level)
     prev_xp = cur_reqs.required_xp if cur_reqs else 0
     percent = level_progress_percent(student.xp, prev_xp, next_reqs.required_xp)
-    return f"{header}\n{draw_progress_bar(percent)}"
+
+    # Строка 3: Прогресс-бар с процентами
+    line_bar = draw_progress_bar(percent)
+
+    # Собираем всё вместе строго через переносы строк
+    return f"{line_name_lvl}\n{line_bp}\nПрогресс: {line_bar}"
 
 
 def build_workout_log_text(
@@ -228,12 +240,12 @@ def build_workout_log_text(
             pts = _points_str(notes.get(last.id), total, 2)[0]
             xp_note = "🚫" if not combo_in_game.get(cid, False) else ""
             parts.append(
-                f"   ↳ Итог связки (Result последнего шага): {pts} очк. "
-                f"+{combo_xp} EXP{xp_note}"
+                f"   ↳ Итог связки : {pts} очк. " f"+{combo_xp} EXP{xp_note}\n"
             )
 
     if singles:
-        parts.append("\n<b>🎯 Одиночные трюки:</b>")
+        parts.append("<b>🎯 Одиночные трюки:</b>")
+        
         for log, trick in singles:
             mult_note = ""
             if log.execution_multiplier and log.execution_multiplier != 1.0:

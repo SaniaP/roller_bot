@@ -15,7 +15,7 @@ _LINE_LABELS = {"50": "50 см", "80": "80 см", "120": "120 см"}
 def cone_line_text(cone_line: str) -> str:
     """Строка-подсказка для экрана: «Дорожка: 80 см (по умолчанию)»."""
     suffix = " (по умолчанию)" if cone_line == DEFAULT_CONE_LINE else ""
-    return f"📏 Дорожка: <b>{_LINE_LABELS.get(cone_line, cone_line)}</b>{suffix}"
+    return f"📏 Дорожка: {_LINE_LABELS.get(cone_line, cone_line)} {suffix}"
 
 
 def build_cone_row(cone_line: str, prefix: str) -> list[tuple[str, str]]:
