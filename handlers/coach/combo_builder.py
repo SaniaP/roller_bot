@@ -37,14 +37,11 @@ router = Router()
 
 
 async def _restore_menu_after_combo(
-    message_or_callback, state: FSMContext, session: AsyncSession
+    message_or_callback,
+    state: FSMContext,
+    session: AsyncSession,
+    cancelled: bool = False,
 ):
-    """Возврат после сохранения/отмены связки:
-    - тренеру — в карточку спортсмена,
-    - ученику — FSM training_active + тренировочное меню (иначе его кнопки
-      перестают обрабатываться: student_start_combo затирал training_active,
-      а state.clear() оставлял ученика вообще без состояния).
-    """
     data = await state.get_data()
     student_id = data.get("combo_student_id")
     workout_id = data.get("combo_workout_id")
@@ -57,8 +54,13 @@ async def _restore_menu_after_combo(
 
     from keyboards.skater_kb import get_student_training_menu
 
+
+
+    # ОПРЕДЕЛЯЕМ ЦЕЛЬ ДЛЯ ОТПРАВКИ (Message или CallbackQuery.message)
+    target = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
+
+    # === ЛОГИКА УЧЕНИКА ===
     if saver and saver.id == student_id and saver.role == "student":
-        # Ожидаемое начисление по связке: Result последнего шага и сумма EXP всех шагов
         items = data.get("combo_items") or []
         combo_points = 0.0
         combo_xp = 0
@@ -66,27 +68,63 @@ async def _restore_menu_after_combo(
             last = items[-1]
             combo_points = last["points"] + last.get("bonus", 0.0)
             combo_xp = data.get("combo_total_xp", 0)
-
-        # Ученик: возвращаем рабочее состояние тренировки и его меню
+        
+        # Сброс и настройка состояний ученика
         await state.clear()
         await state.set_state(StudentStates.training_active)
         await state.update_data(
             current_workout_id=workout_id,
             cone_line=data.get("cone_line"),
         )
-        await message_or_callback.message.answer(
-            "🧩 Связка отправлена тренеру на проверку!\n\n"
+        
+        msg_text = (
+            "↩️ Действие отменено."
+            if cancelled
+            else "🧩 Связка отправлена тренеру на проверку!\n\n"
             f"📊 **Ожидаемое начисление:**\n"
             f"• Баллы: +{round(combo_points, 2)}\n"
             f"• Опыт: +{combo_xp} EXP\n\n"
-            "⏳ Очки и EXP засчитаются после подтверждения тренером.",
+            "⏳ Очки и EXP засчитаются после подтверждения тренером."
+        )
+
+            # === ПРОЖИГАЕМ / УДАЛЯЕМ СТАРЫЙ КОНСТРУКТОР Д для ученика
+        if isinstance(message_or_callback, CallbackQuery):
+            try:
+                await message_or_callback.message.delete()
+            except Exception:
+                pass    
+
+
+        # Отправляем ученику одно чистое сообщение
+        await target.answer(
+            msg_text,
             reply_markup=get_student_training_menu(),
         )
+
+    # === ЛОГИКА ТРЕНЕРА ===
     else:
-        # Тренер: возвращаемся в карточку спортсмена
         await state.clear()
+        
+        # 2. ВОССТАНАВЛИВАЕМ FSM ТРЕНЕРА
+        # Укажите здесь то состояние, в котором тренер находится, когда смотрит карточку ученика
+        # Например, если у вас это CoachRegistrationStates.workout_active или WorkoutCreationStates:
+        # await state.set_state(CoachRegistrationStates.workout_active) 
+        
+        # Записываем обратно ID тренировки и ученика, чтобы тренер мог дальше кликать по карточке
+        await state.update_data(
+            current_workout_id=workout_id,
+            selected_student_id=student_id
+        )
+
         from handlers.coach.workout import show_skater_card_or_main_list
 
+        if isinstance(message_or_callback, CallbackQuery) and cancelled:
+            try:
+                await message_or_callback.answer("Действие отменено")
+            except Exception:
+                pass
+
+        # Вызываем функцию: она выполнит .edit_text() и превратит конструктор обратно в карточку ученика
         await show_skater_card_or_main_list(
             message_or_callback,
             TrickAction(
@@ -315,9 +353,9 @@ async def combo_first_trick(
     await state.set_state(ComboBuilderStates.waiting_first_quantity)
 
     await callback.message.edit_text(
-        f"{cone_line_text(cone_line)}\n\n"
-        "🔢 Отправьте количество конусов (можно с поправкой качества: `8,-10` или `11,20`):",
+        _combo_cones_prompt(cone_line),
         parse_mode="Markdown",
+        reply_markup=_combo_cancel_kb(),
     )
     await callback.answer()
 
@@ -412,8 +450,8 @@ async def combo_cancel(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ):
     # Возврат: тренеру — в карточку спортсмена, ученику — в тренировочное меню
-    await _restore_menu_after_combo(callback, state, session)
-    await callback.answer("Связка отменена")
+    await _restore_menu_after_combo(callback, state, session, cancelled=True)
+    await callback.answer("Действие отменено")
 
 
 @router.callback_query(
@@ -536,9 +574,9 @@ async def combo_next_pick(
     await state.set_state(ComboBuilderStates.waiting_next_quantity)
 
     await callback.message.edit_text(
-        f"{cone_line_text(cone_line)}\n\n"
-        "🔢 Отправьте количество конусов (можно с поправкой: `8,-10` / `11,20`):",
+        _combo_cones_prompt(cone_line),
         parse_mode="Markdown",
+        reply_markup=_combo_cancel_kb(),
     )
     await callback.answer()
 
@@ -681,6 +719,23 @@ async def combo_save(
     await _restore_menu_after_combo(callback, state, session)
 
 
+def _combo_cones_prompt(cone_line: str) -> str:
+    """Единый текст экрана ввода конусов в конструкторе связки."""
+    return (
+        f"{cone_line_text(cone_line)}\n\n"
+        "🔢 Отправьте количество конусов (можно с поправкой качества: `8,-10` или `11,20`):"
+    )
+
+
+def _combo_cancel_kb() -> InlineKeyboardMarkup:
+    """Кнопка отмены на экране ввода количества конусов в связке."""
+    return (
+        InlineKeyboardBuilder()
+        .button(text="❌ Отмена", callback_data="cmb_cancel")
+        .as_markup()
+    )
+
+
 # Универсальный обработчик отмены на любых стадиях (cmb_cancel из inline-клавиатур)
 @router.callback_query(F.data == "cmb_cancel")
 async def combo_cancel_universal(
@@ -689,5 +744,5 @@ async def combo_cancel_universal(
     # Возврат: тренеру — в карточку спортсмена, ученику — в тренировочное меню.
     # Раньше здесь был state.clear() без восстановления training_active,
     # из-за чего у ученика после отмены переставали работать все кнопки меню.
-    await _restore_menu_after_combo(callback, state, session)
-    await callback.answer("Отменено")
+    await _restore_menu_after_combo(callback, state, session, cancelled=True)
+    await callback.answer("Действие отменено")

@@ -2,7 +2,13 @@
 import uuid
 from typing import Optional
 from aiogram import Router, F, types
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -34,7 +40,7 @@ from handlers.coach.handbook import _handbook_categories_kb
 from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_markup
 from states import StudentStates
 from states.coach_states import ComboBuilderStates
-from keyboards.coach_kb import ComboAction
+from keyboards.coach_kb import ComboAction, get_categories_kb
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -142,207 +148,44 @@ async def student_process_pin(
 async def show_categories_dynamic(
     message: Message, state: FSMContext, session: AsyncSession
 ):
-    """Динамически вытаскиваем уникальные категории слалома из таблицы Tricks"""
-    query = select(distinct(Trick.category))
-    categories = (await session.execute(query)).scalars().all()
+    """Ученик открывает общий экран выбора категории (единый поток с тренером).
 
-    if not categories:
-        await message.answer("В базе данных пока не созданы трюки.")
-        return
-
-    buttons = []
-    for cat in categories:
-        if cat:
-            buttons.append(
-                [
-                    types.InlineKeyboardButton(
-                        text=str(cat), callback_data=f"st_cat:{cat}"
-                    )
-                ]
-            )
-
-    # Строка переключения дорожки (по умолчанию 80, запоминается между трюками)
+    Все дальнейшие шаги (категория -> трюк -> конусы -> сохранение/отмена)
+    обрабатываются общими хэндлерами handlers.coach.trick_flow.
+    """
     data = await state.get_data()
     cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
-    keyboard = [track_row_markup(cone_line, "st_coneset:{line}")] + buttons
-
-    await message.answer(
-        f"Выберите категорию трюка.\n{cone_line_text(cone_line)}",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
-    )
-
-
-@router.callback_query(StudentStates.training_active, F.data.startswith("st_coneset:"))
-async def student_switch_cone_line(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
-):
-    """Смена дорожки учеником прямо на экране категорий (запоминается в FSM)."""
-    cone_line = callback.data.split(":")[1]
-    await state.update_data(cone_line=cone_line)
 
     categories = (
         (await session.execute(select(distinct(Trick.category)))).scalars().all()
     )
-    buttons = [
-        [types.InlineKeyboardButton(text=str(cat), callback_data=f"st_cat:{cat}")]
-        for cat in categories
-        if cat
-    ]
-    keyboard = [track_row_markup(cone_line, "st_coneset:{line}")] + buttons
-    await callback.message.edit_text(
-        f"Выберите категорию трюка.\n{cone_line_text(cone_line)}",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
-    )
-    await callback.answer(f"Дорожка: {cone_line} см")
-
-
-@router.callback_query(StudentStates.training_active, F.data.startswith("st_cat:"))
-async def show_tricks_by_category(callback: CallbackQuery, session: AsyncSession):
-    """Показываем трюки из выбранной текстовой категории"""
-    category_name = callback.data.split(":", 1)[1]
-
-    query = select(Trick).where(Trick.category == category_name)
-    tricks = (await session.execute(query)).scalars().all()
-
-    buttons = []
-    for t in tricks:
-        buttons.append(
-            [
-                types.InlineKeyboardButton(
-                    text=f"{t.name}", callback_data=f"st_trick:{t.id}"
-                )
-            ]
-        )
-    buttons.append(
-        [
-            types.InlineKeyboardButton(
-                text="⬅️ Назад к категориям", callback_data="st_back_to_cats"
-            )
-        ]
-    )
-
-    await callback.message.edit_text(
-        f"Категория: {category_name}\nВыберите трюк:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-    await callback.answer()
-
-
-@router.callback_query(StudentStates.training_active, F.data == "st_back_to_cats")
-async def back_to_categories(callback: CallbackQuery, session: AsyncSession):
-    query = select(distinct(Trick.category))
-    categories = (await session.execute(query)).scalars().all()
-    buttons = [
-        [types.InlineKeyboardButton(text=str(cat), callback_data=f"st_cat:{cat}")]
-        for cat in categories
-        if cat
-    ]
-    await callback.message.edit_text(
-        "Выберите категорию трюка:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
-    await callback.answer()
-
-
-# =====================================================================
-# ШАГ ВЫБОРА ДОРОЖКИ И КОНУСОВ
-# =====================================================================
-
-
-@router.callback_query(StudentStates.training_active, F.data.startswith("st_trick:"))
-async def student_select_trick_done(callback: CallbackQuery, state: FSMContext):
-    """Трюк выбран: сразу запрашиваем конусы, дорожка берется из FSM"""
-    trick_id = int(callback.data.split(":")[1])
-
-    # Дорожка берется из FSM (по умолчанию 80, меняется на экране категорий)
-    data = await state.get_data()
-    distance = data.get("cone_line", DEFAULT_CONE_LINE)
-
-    await state.update_data(selected_trick_id=trick_id, selected_distance=distance)
-    await state.set_state(StudentStates.waiting_for_cones)
-
-    await callback.message.edit_text(
-        f"{cone_line_text(distance)}\n\n"
-        "Отправьте сообщением количество чисто пройденных конусов (например: `20`):",
-        parse_mode="Markdown",
-    )
-    await callback.answer()
-
-
-@router.message(StudentStates.waiting_for_cones)
-async def student_save_final_trick(
-    message: Message, state: FSMContext, session: AsyncSession
-):
-    """Получаем конусы, считаем очки, пишем в TrickLog и обновляем суммарные очки тренировки"""
-    cones_input = message.text.strip()
-
-    if not cones_input.isdigit() or int(cones_input) <= 0:
-        await message.answer(
-            "⚠️ Пожалуйста, введите корректное число конусов (целое положительное число):"
-        )
+    categories = [c for c in categories if c]
+    if not categories:
+        await message.answer("В базе данных пока не созданы трюки.")
         return
 
-    cones_count = int(cones_input)
-
-    # Извлекаем данные из FSM сессии
-    data = await state.get_data()
-    workout_id = data.get("current_workout_id")
-    trick_id = data.get("selected_trick_id")
-    distance = data.get("selected_distance")  # "50", "80" или "120"
-
-    # Получаем объекты сущностей
-    trick = await session.get(Trick, trick_id)
+    workout_id = data.get("current_workout_id") or 0
     user = (
         await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
     ).scalar_one_or_none()
+    if not user:
+        await message.answer("❌ Профиль не найден.")
+        return
 
-    # Множитель по умолчанию равен 1.0 (чисто)
-    execution_multiplier = 1.0
-
-    # Вызываем твой калькулятор (возвращает кортеж: (баллы, EXP))
-    points_earned, xp_earned = await calculate_single_trick(
-        trick=trick,
-        cone_line=distance,
-        quantity=cones_count,
-        execution_multiplier=execution_multiplier,
-        skater_level=user.level,
-        db_session=session,
-    )
-
-    # 1. ЗАПИСЬ ДЕТАЛИЗИРОВАННОГО ЛОГА В trick_logs
-    new_trick_log = TrickLog(
-        workout_id=workout_id,
-        student_id=user.id,  # Внутренний ID юзера
-        trick_id=trick.id,
-        cone_line=distance,  # "50", "80", "120"
-        quantity=cones_count,
-        execution_multiplier=execution_multiplier,
-        calculated_points=points_earned,
-        calculated_xp=xp_earned,
-        needs_review=True,  # Трюк отправлен самостоятельно, ждем подтверждения тренера
-    )
-    session.add(new_trick_log)
-
-    # НЕ начисляем очки сразу: результаты засчитаются только после
-    # подтверждения тренером (секция проверки needs_review в coach.py)
-    await session.commit()
-
-    # Возвращаем FSM в режим активного ожидания следующего трюка
-    await state.set_state(StudentStates.training_active)
+    # Запоминаем контекст ученика: по нему работает общий поток (by_student=True)
+    await state.update_data(workout_id=workout_id, student_id=user.id, by_student=True)
 
     await message.answer(
-        f"✨ Трюк отправлен на проверку тренеру!\n\n"
-        f"🛹 Трюк: {trick.name}\n"
-        f"📏 Дорожка: {distance} см\n"
-        f"🪚 Пройдено конусов: {cones_count} шт.\n\n"
-        f"📊 **Ожидаемое начисление:**\n"
-        f"• Баллы: +{points_earned}\n"
-        f"• Опыт: +{xp_earned} EXP\n\n"
-        f"⏳ Очки и EXP засчитаются после подтверждения тренером.",
-        reply_markup=get_student_training_menu(),
-        parse_mode="Markdown",
+        f"Выберите категорию трюка.\n{cone_line_text(cone_line)}",
+        reply_markup=get_categories_kb(
+            workout_id,
+            user.id,
+            categories,
+            by_student=True,
+            cone_line=cone_line,
+        ),
     )
 
 
@@ -390,9 +233,16 @@ async def student_start_combo(
     kb.button(text="❌ Отмена связки", callback_data="cmb_cancel")
     kb.adjust(2)
 
+    # Ряд выбора дорожки — как при добавлении одиночного трюка и у тренера
+    cone_line = (await state.get_data()).get("cone_line", DEFAULT_CONE_LINE)
+    await state.update_data(cone_line=cone_line)
+    rows = [track_row_markup(cone_line, "cmb_coneset:{line}")]
+    rows += list(kb.as_markup().inline_keyboard)
+
     await message.answer(
-        "🧩 <b>Конструктор связки</b>\n\nШаг 1: выберите категорию первого трюка:",
-        reply_markup=kb.as_markup(),
+        f"🧩 <b>Конструктор связки</b>\n\n{cone_line_text(cone_line)}\n\n"
+        "Шаг 1: выберите категорию первого трюка:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         parse_mode="HTML",
     )
     # Переводим ученика в общий FSM конструктора связки

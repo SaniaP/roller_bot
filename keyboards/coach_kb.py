@@ -3,6 +3,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.filters.callback_data import CallbackData
 from typing import Optional
 from models import User, Trick, TrickLog
+from handlers.track_state import build_cone_row
 
 
 # --- Фабрики Callback Data для безопасной передачи параметров ---
@@ -13,12 +14,16 @@ class WorkoutAction(CallbackData, prefix="wrk"):
 
 
 class TrickAction(CallbackData, prefix="trck"):
-    action: str  # "choose_cat", "choose_trick", "log_trick", "delete_log"
+    action: str  # "choose_cat", "choose_trick", "log_trick", "delete_log", "cancel_input", "coneset"
     workout_id: int
     student_id: int
     category: Optional[str] = None
     trick_id: Optional[int] = None
     log_id: Optional[int] = None
+    # Кто инициирует ввод трюка: False — тренер, True — ученик (самостоятельно)
+    by_student: bool = False
+    # Дорожка конусов для action="coneset" ("50" | "80" | "120")
+    line: Optional[str] = None
 
 
 class ComboAction(CallbackData, prefix="cmb"):
@@ -141,10 +146,31 @@ def get_skater_workout_card_kb(
 
 
 def get_categories_kb(
-    workout_id: int, student_id: int, categories: list[str]
+    workout_id: int,
+    student_id: int,
+    categories: list[str],
+    by_student: bool = False,
+    cone_line: str = None,
 ) -> InlineKeyboardMarkup:
-    """Выбор категории трюка из справочника"""
+    """Выбор категории трюка (тренер и ученик — единый поток).
+
+    by_student=False — callback'и для тренера; True — для ученика.
+    cone_line — если задан, добавляется ряд переключения дорожки.
+    """
     builder = InlineKeyboardBuilder()
+    # Сначала выбор дорожки, под ним — категории
+    if cone_line is not None:
+        for text, cb in build_cone_row(
+            cone_line,
+            TrickAction(
+                action="coneset",
+                workout_id=workout_id,
+                student_id=student_id,
+                by_student=by_student,
+                line="{line}",
+            ).pack(),
+        ):
+            builder.button(text=text, callback_data=cb)
     for cat in categories:
         builder.button(
             text=str(cat).capitalize(),
@@ -153,22 +179,29 @@ def get_categories_kb(
                 workout_id=workout_id,
                 student_id=student_id,
                 category=cat,
+                by_student=by_student,
             ),
         )
     builder.button(
         text="❌ Отмена",
-        callback_data=WorkoutAction(
-            action="select_skater", workout_id=workout_id, student_id=student_id
+        callback_data=TrickAction(
+            action="cancel_input",
+            workout_id=workout_id,
+            student_id=student_id,
+            by_student=by_student,
         ),
     )
-    builder.adjust(2)
+    builder.adjust(3 if cone_line is not None else 2)
     return builder.as_markup()
 
 
 def get_tricks_by_cat_kb(
-    workout_id: int, student_id: int, tricks: list[Trick]
+    workout_id: int,
+    student_id: int,
+    tricks: list[Trick],
+    by_student: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Выбор конкретного трюка из выбранной категории"""
+    """Выбор конкретного трюка из выбранной категории (тренер и ученик)."""
     builder = InlineKeyboardBuilder()
     for trick in tricks:
         builder.button(
@@ -178,15 +211,45 @@ def get_tricks_by_cat_kb(
                 workout_id=workout_id,
                 student_id=student_id,
                 trick_id=trick.id,
+                by_student=by_student,
             ),
         )
     builder.button(
         text="⬅️ К категориям",
         callback_data=TrickAction(
-            action="choose_cat", workout_id=workout_id, student_id=student_id
+            action="choose_cat",
+            workout_id=workout_id,
+            student_id=student_id,
+            by_student=by_student,
+        ),
+    )
+    builder.button(
+        text="❌ Отмена",
+        callback_data=TrickAction(
+            action="cancel_input",
+            workout_id=workout_id,
+            student_id=student_id,
+            by_student=by_student,
         ),
     )
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_cones_input_kb(
+    workout_id: int, student_id: int, by_student: bool = False
+) -> InlineKeyboardMarkup:
+    """Кнопка отмены на экране ввода количества конусов (тренер и ученик)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✖️ Отмена",
+        callback_data=TrickAction(
+            action="cancel_input",
+            workout_id=workout_id,
+            student_id=student_id,
+            by_student=by_student,
+        ),
+    )
     return builder.as_markup()
 
 
