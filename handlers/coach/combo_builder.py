@@ -54,10 +54,12 @@ async def _restore_menu_after_combo(
 
     from keyboards.skater_kb import get_student_training_menu
 
-
-
     # ОПРЕДЕЛЯЕМ ЦЕЛЬ ДЛЯ ОТПРАВКИ (Message или CallbackQuery.message)
-    target = message_or_callback.message if isinstance(message_or_callback, CallbackQuery) else message_or_callback
+    target = (
+        message_or_callback.message
+        if isinstance(message_or_callback, CallbackQuery)
+        else message_or_callback
+    )
 
     # === ЛОГИКА УЧЕНИКА ===
     if saver and saver.id == student_id and saver.role == "student":
@@ -68,7 +70,7 @@ async def _restore_menu_after_combo(
             last = items[-1]
             combo_points = last["points"] + last.get("bonus", 0.0)
             combo_xp = data.get("combo_total_xp", 0)
-        
+
         # Сброс и настройка состояний ученика
         await state.clear()
         await state.set_state(StudentStates.training_active)
@@ -76,7 +78,7 @@ async def _restore_menu_after_combo(
             current_workout_id=workout_id,
             cone_line=data.get("cone_line"),
         )
-        
+
         msg_text = (
             "↩️ Действие отменено."
             if cancelled
@@ -87,13 +89,12 @@ async def _restore_menu_after_combo(
             "⏳ Очки и EXP засчитаются после подтверждения тренером."
         )
 
-            # === ПРОЖИГАЕМ / УДАЛЯЕМ СТАРЫЙ КОНСТРУКТОР Д для ученика
+        # === ПРОЖИГАЕМ / УДАЛЯЕМ СТАРЫЙ КОНСТРУКТОР Д для ученика
         if isinstance(message_or_callback, CallbackQuery):
             try:
                 await message_or_callback.message.delete()
             except Exception:
-                pass    
-
+                pass
 
         # Отправляем ученику одно чистое сообщение
         await target.answer(
@@ -104,19 +105,27 @@ async def _restore_menu_after_combo(
     # === ЛОГИКА ТРЕНЕРА ===
     else:
         await state.clear()
-        
+
         # 2. ВОССТАНАВЛИВАЕМ FSM ТРЕНЕРА
         # Укажите здесь то состояние, в котором тренер находится, когда смотрит карточку ученика
         # Например, если у вас это CoachRegistrationStates.workout_active или WorkoutCreationStates:
-        # await state.set_state(CoachRegistrationStates.workout_active) 
-        
+        # await state.set_state(CoachRegistrationStates.workout_active)
+
         # Записываем обратно ID тренировки и ученика, чтобы тренер мог дальше кликать по карточке
         await state.update_data(
-            current_workout_id=workout_id,
-            selected_student_id=student_id
+            current_workout_id=workout_id, selected_student_id=student_id
         )
 
-        from handlers.coach.workout import show_skater_card_or_main_list
+        from handlers.coach.helpers import show_skater_card_or_main_list
+
+        # Экран ввода конусов отправлялся «с нуля» (delete + answer), поэтому
+        # удаляем его: карточка будет отправлена новым сообщением через fallback
+        # внутри show_skater_card_or_main_list.
+        if isinstance(message_or_callback, CallbackQuery):
+            try:
+                await message_or_callback.message.delete()
+            except Exception:
+                pass
 
         if isinstance(message_or_callback, CallbackQuery) and cancelled:
             try:
@@ -352,8 +361,21 @@ async def combo_first_trick(
     await state.update_data(combo_trick_id=trick_id, combo_cone=cone_line)
     await state.set_state(ComboBuilderStates.waiting_first_quantity)
 
-    await callback.message.edit_text(
-        _combo_cones_prompt(cone_line),
+    # Подсказка зависит от того, кто вводит конусы: ученик — только число,
+    # тренер — число с опциональной поправкой качества (как в trick_flow).
+    by_student = await _inputter_is_student(
+        session, callback.from_user.id, data.get("combo_student_id")
+    )
+
+    # Вариант №2: удаляем «простыню» списка трюков и отправляем меню ввода
+    # конусов новым сообщением внизу чата, чтобы экран прокрутился к нему.
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        _combo_cones_prompt(cone_line, by_student=by_student),
         parse_mode="Markdown",
         reply_markup=_combo_cancel_kb(),
     )
@@ -366,14 +388,34 @@ async def combo_first_quantity(
 ):
     from handlers.coach.helpers import parse_quantity_input, percentage_to_multiplier
 
-    parsed = parse_quantity_input(message.text.strip().replace(" ", ""))
-    if not parsed:
-        await message.answer("⚠️ Формат: `9` или `8,-10` / `11,20`")
-        return
-    quantity, pct = parsed
+    data = await state.get_data()
+
+    # Как в trick_flow: ученик вводит только целое число конусов, без поправок
+    if await _inputter_is_student(
+        session, message.from_user.id, data.get("combo_student_id")
+    ):
+        try:
+            quantity = int(message.text.strip().replace(" ", ""))
+            if quantity <= 0:
+                raise ValueError
+        except ValueError:
+            quantity = None
+        pct = None
+        if quantity is None:
+            await message.answer(
+                "⚠️ Пожалуйста, введите корректное число конусов "
+                "(целое положительное число):"
+            )
+            return
+    else:
+        parsed = parse_quantity_input(message.text.strip().replace(" ", ""))
+        if not parsed:
+            await message.answer("⚠️ Формат: `9` или `8,-10` / `11,20`")
+            return
+        quantity, pct = parsed
+
     mult = percentage_to_multiplier(int(pct)) if pct else 1.0
 
-    data = await state.get_data()
     trick = await session.get(Trick, data["combo_trick_id"])
     student = await session.get(User, data["combo_student_id"])
 
@@ -566,15 +608,29 @@ async def combo_next_switch_cone_line(
     ComboBuilderStates.choosing_next_trick, ComboAction.filter(F.action == "combo_pick")
 )
 async def combo_next_pick(
-    callback: CallbackQuery, callback_data: ComboAction, state: FSMContext
+    callback: CallbackQuery,
+    callback_data: ComboAction,
+    state: FSMContext,
+    session: AsyncSession,
 ):
     data = await state.get_data()
     cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
     await state.update_data(combo_trick_id=callback_data.trick_id, combo_cone=cone_line)
     await state.set_state(ComboBuilderStates.waiting_next_quantity)
 
-    await callback.message.edit_text(
-        _combo_cones_prompt(cone_line),
+    # Подсказка зависит от того, кто вводит конусы (как в trick_flow).
+    by_student = await _inputter_is_student(
+        session, callback.from_user.id, data.get("combo_student_id")
+    )
+
+    # Вариант №2: как и для первого трюка — delete + answer вместо edit_text.
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        _combo_cones_prompt(cone_line, by_student=by_student),
         parse_mode="Markdown",
         reply_markup=_combo_cancel_kb(),
     )
@@ -588,14 +644,33 @@ async def combo_next_quantity(
     """Расчет шага: Y = чистый балл нового трюка, Result по формуле, бонус = Result - Y"""
     from handlers.coach.helpers import parse_quantity_input, percentage_to_multiplier
 
-    parsed = parse_quantity_input(message.text.strip().replace(" ", ""))
-    if not parsed:
-        await message.answer("⚠️ Формат: `9` или `8,-10` / `11,20`")
-        return
-    quantity, pct = parsed
-    mult = percentage_to_multiplier(int(pct)) if pct else 1.0
-
     data = await state.get_data()
+
+    # Как в trick_flow: ученик вводит только целое число конусов, без поправок
+    if await _inputter_is_student(
+        session, message.from_user.id, data.get("combo_student_id")
+    ):
+        try:
+            quantity = int(message.text.strip().replace(" ", ""))
+            if quantity <= 0:
+                raise ValueError
+        except ValueError:
+            quantity = None
+        pct = None
+        if quantity is None:
+            await message.answer(
+                "⚠️ Пожалуйста, введите корректное число конусов "
+                "(целое положительное число):"
+            )
+            return
+    else:
+        parsed = parse_quantity_input(message.text.strip().replace(" ", ""))
+        if not parsed:
+            await message.answer("⚠️ Формат: `9` или `8,-10` / `11,20`")
+            return
+        quantity, pct = parsed
+
+    mult = percentage_to_multiplier(int(pct)) if pct else 1.0
     trick = await session.get(Trick, data["combo_trick_id"])
     student = await session.get(User, data["combo_student_id"])
     prev_result = data["combo_prev_result"]
@@ -719,12 +794,34 @@ async def combo_save(
     await _restore_menu_after_combo(callback, state, session)
 
 
-def _combo_cones_prompt(cone_line: str) -> str:
-    """Единый текст экрана ввода конусов в конструкторе связки."""
+def _combo_cones_prompt(cone_line: str, by_student: bool = False) -> str:
+    """Единый текст экрана ввода конусов в конструкторе связки.
+
+    by_student=True (ученик): только число конусов, без поправок качества.
+    by_student=False (тренер): можно указать поправку «8,-10» / «11,20».
+    """
+    if by_student:
+        return f"{cone_line_text(cone_line)}\n\n🔢 Отправьте количество конусов."
     return (
         f"{cone_line_text(cone_line)}\n\n"
-        "🔢 Отправьте количество конусов (можно с поправкой качества: `8,-10` или `11,20`):"
+        "🔢 Отправьте количество конусов"
+        " (можно с поправкой качества: `8,-10` — штраф / `11,20` — бонус):"
     )
+
+
+async def _inputter_is_student(
+    session: AsyncSession, telegram_user_id: int, student_id: int | None
+) -> bool:
+    """Определяет, кто вводит конусы: сам ученик (True) или тренер (False).
+
+    Аналогично combo_save: смотрим, кто реально пишет/нажимает, по telegram_id.
+    """
+    if not student_id:
+        return False
+    user = (
+        await session.execute(select(User).where(User.telegram_id == telegram_user_id))
+    ).scalar_one_or_none()
+    return bool(user and user.id == student_id and user.role == "student")
 
 
 def _combo_cancel_kb() -> InlineKeyboardMarkup:
@@ -734,6 +831,96 @@ def _combo_cancel_kb() -> InlineKeyboardMarkup:
         .button(text="❌ Отмена", callback_data="cmb_cancel")
         .as_markup()
     )
+
+
+# ---------------------------------------------------------------------
+# Отмена на стадии ввода конусов: возврат к предыдущему меню
+# (списку трюков категории), а не отмена всей связки
+# ---------------------------------------------------------------------
+
+
+async def _back_to_trick_list(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Возвращает к списку трюков категории выбранного трюка.
+
+    Список связки сохраняется, состояние возвращается на выбор первого
+    или следующего трюка (в зависимости от того, есть ли уже шаги).
+    """
+    data = await state.get_data()
+    trick = await session.get(Trick, data.get("combo_trick_id"))
+    category = trick.category if trick else None
+
+    tricks = []
+    if category:
+        tricks = (
+            (await session.execute(select(Trick).where(Trick.category == category)))
+            .scalars()
+            .all()
+        )
+
+    kb = InlineKeyboardBuilder()
+    next_step = bool(data.get("combo_items"))
+    for t in tricks:
+        if next_step:
+            # Шаг 2+: трюки выбираются через ComboAction.combo_pick
+            kb.button(
+                text=f"{t.name} (Tier {t.trick_tier})",
+                callback_data=ComboAction(
+                    action="combo_pick",
+                    workout_id=data.get("combo_workout_id", 0),
+                    student_id=data.get("combo_student_id", 0),
+                    category=category,
+                    trick_id=t.id,
+                ),
+            )
+        else:
+            # Первый трюк выбирается через сырой callback cmb_trick:
+            kb.button(
+                text=f"{t.name} (Tier {t.trick_tier})",
+                callback_data=f"cmb_trick:{t.id}",
+            )
+    kb.button(text="❌ Отмена связки", callback_data="cmb_cancel")
+    kb.adjust(1)
+
+    header = (
+        "Выберите первый трюк связки:"
+        if not next_step
+        else f"Категория: {(category or '').upper()}. Выберите следующий трюк связки:"
+    )
+
+    # Экран конусов отправлялся «с нуля» (delete + answer) — удаляем его
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await callback.message.answer(header, reply_markup=kb.as_markup())
+
+    if data.get("combo_items"):
+        await state.set_state(ComboBuilderStates.choosing_next_trick)
+    else:
+        await state.set_state(ComboBuilderStates.choosing_first_trick)
+
+
+@router.callback_query(
+    ComboBuilderStates.waiting_first_quantity, F.data == "cmb_cancel"
+)
+async def combo_cancel_first_quantity(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Отмена на вводе конусов первого трюка — назад к списку трюков."""
+    await _back_to_trick_list(callback, state, session)
+    await callback.answer("Выбор возвращен к списку трюков")
+
+
+@router.callback_query(ComboBuilderStates.waiting_next_quantity, F.data == "cmb_cancel")
+async def combo_cancel_next_quantity(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Отмена на вводе конусов очередного трюка — назад к списку трюков."""
+    await _back_to_trick_list(callback, state, session)
+    await callback.answer("Выбор возвращен к списку трюков")
 
 
 # Универсальный обработчик отмены на любых стадиях (cmb_cancel из inline-клавиатур)

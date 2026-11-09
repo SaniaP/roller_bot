@@ -7,13 +7,11 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.orm import joinedload
 
 from models import User, Workout, WorkoutRegistration, TrickLog
 from states.workout_states import CoachWorkoutStates
 from keyboards.coach_kb import (
     get_active_workout_kb,
-    get_skater_workout_card_kb,
     WorkoutAction,
 )
 from calculator import calculate_current_workout_totals, check_level_up
@@ -22,6 +20,7 @@ from handlers.coach.helpers import (
     get_active_workout,
     get_workout_students,
     new_workout_now,
+    show_skater_card_or_main_list,
 )
 from keyboards.skater_kb import get_student_main_menu
 
@@ -128,70 +127,15 @@ async def add_skater_from_db_list(
 
 
 @router.callback_query(WorkoutAction.filter(F.action == "select_skater"))
-async def show_skater_card_or_main_list(
+async def show_skater_card_handler(
     callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession
 ):
-    """Ярус карточки спортсмена: показывает текущий лвл, опыт и предварительный балл"""
-    workout_id = callback_data.workout_id
-    student_id = callback_data.student_id
+    """Хэндлер яруса карточки спортсмена.
 
-    # Если student_id пустой — возвращаемся к главному списку тренировки
-    if not student_id:
-        current_students = await get_workout_students(session, workout_id)
-        await callback.message.edit_text(
-            "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nСписок спортсменов на занятии:",
-            reply_markup=get_active_workout_kb(workout_id, current_students),
-        )
-        return
-
-    # Если передан student_id — проверяем/создаем регистрацию на тренировку
-    reg = (
-        await session.execute(
-            select(WorkoutRegistration).where(
-                WorkoutRegistration.workout_id == workout_id,
-                WorkoutRegistration.student_id == student_id,
-            )
-        )
-    ).scalar_one_or_none()
-
-    if not reg:
-        reg = WorkoutRegistration(workout_id=workout_id, student_id=student_id)
-        session.add(reg)
-        await session.commit()
-
-    student = await session.get(User, student_id)
-
-    # Тянем все логи трюков этого ученика за текущую сессию
-    logs = (
-        (
-            await session.execute(
-                select(TrickLog).where(
-                    TrickLog.workout_id == workout_id, TrickLog.student_id == student_id
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-    # Калькуляция результатов «на лету»
-    current_sport_score, current_xp_gain = await calculate_current_workout_totals(
-        list(logs), student, session
-    )
-
-    card_text = (
-        f"👤 **Спортсмен:** {student.full_name}\n"
-        f"🎮 **Ранг:** {student.title} (Уровень: {student.level})\n"
-        f"✨ **Текущий опыт:** {student.xp} EXP\n\n"
-        f"📊 **Предварительные итоги сессии:**\n"
-        f" — Средний спортивный балл: <b>{current_sport_score}</b>\n"
-        f" — Набрано опыта за сегодня: <b>+{current_xp_gain} EXP</b>"
-    )
-
-    await callback.message.edit_text(
-        text=card_text,
-        reply_markup=get_skater_workout_card_kb(workout_id, student_id, list(logs)),
-    )
+    Логика отрисовки живет в helpers.show_skater_card_or_main_list —
+    ее же напрямую импортируют trick_flow и combo_builder.
+    """
+    await show_skater_card_or_main_list(callback, callback_data, session)
 
 
 # ==========================================
@@ -233,8 +177,8 @@ async def process_finish_workout(
         await state.clear()
         await callback.message.delete()
         await callback.message.answer(
-            "🏁 Тренировка завершена (учеников не было).", 
-            reply_markup=await get_coach_menu_for(session)
+            "🏁 Тренировка завершена (учеников не было).",
+            reply_markup=await get_coach_menu_for(session),
         )
         return
 
@@ -312,7 +256,7 @@ async def process_finish_workout(
         student = students_dict.get(reg.student_id)
         if not student or not student.telegram_id:
             continue
-            
+
         # Исправленный StorageKey (bot_id вместо bot)
         student_state = FSMContext(
             storage=state.storage,

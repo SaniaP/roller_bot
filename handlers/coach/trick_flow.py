@@ -174,7 +174,16 @@ async def start_trick_quantity_input(
             extra=(" (можно с поправкой качества: `8,-10` — штраф / `11,20` — бонус)"),
         )
 
-    await callback.message.edit_text(
+    # Вариант №2: удаляем «простыню» с длинным списком трюков и отправляем
+    # компактное меню ввода конусов новым сообщением внизу чата,
+    # чтобы экран автоматически прокрутился к нему.
+    try:
+        await callback.message.delete()
+    except Exception:
+        # Сообщение могло быть уже удалено или не подлежит удалению — не критично.
+        pass
+
+    await callback.message.answer(
         prompt,
         parse_mode="Markdown",
         reply_markup=get_cones_input_kb(
@@ -237,14 +246,23 @@ async def process_cancel_input(
             current_workout_id=workout_id, selected_student_id=student_id
         )
 
-        from handlers.coach.workout import show_skater_card_or_main_list
+        from handlers.coach.helpers import show_skater_card_or_main_list
 
         try:
             await callback.answer("Действие отменено")
         except Exception:
             pass
 
-        # Перерисовываем сообщение ввода трюка обратно в карточку этого спортсмена
+        # Сообщение ввода конусов отправлялось «с нуля» (delete + answer),
+        # поэтому edit_text внутри карточки упал бы с «message to edit not found».
+        # Удаляем его вручную — show_skater_card_or_main_list тогда отправит
+        # карточку новым сообщением через свой fallback (см. try/except там).
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        # Перерисовываем карточку этого спортсмена заново
         await show_skater_card_or_main_list(
             callback,
             TrickAction(
@@ -300,11 +318,17 @@ async def cancel_input_on_other_action(
             current_workout_id=workout_id, selected_student_id=student_id
         )
 
-        from handlers.coach.workout import show_skater_card_or_main_list
+        from handlers.coach.helpers import show_skater_card_or_main_list
 
         await callback.answer("Ввод отменен")
 
-        # Заменяем текущее сообщение обратно на карточку
+        # Меню ввода конусов было отправлено отдельным сообщением (delete + answer)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        # Отрисовываем карточку заново (fallback на .answer() внутри функции)
         await show_skater_card_or_main_list(
             callback,
             TrickAction(
@@ -484,7 +508,7 @@ async def delete_last_trick_log(
     """Отмена ошибочно внесенного трюка."""
     from sqlalchemy import delete
 
-    from handlers.coach.workout import show_skater_card_or_main_list
+    from handlers.coach.helpers import show_skater_card_or_main_list
 
     await session.execute(delete(TrickLog).where(TrickLog.id == callback_data.log_id))
     await session.commit()

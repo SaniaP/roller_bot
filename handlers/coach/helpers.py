@@ -7,8 +7,16 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from models import User, Workout, WorkoutRegistration, Trick
-from keyboards.coach_kb import get_coach_main_menu_sync
+from aiogram.types import CallbackQuery
+
+from models import User, Workout, WorkoutRegistration, Trick, TrickLog
+from keyboards.coach_kb import (
+    get_coach_main_menu_sync,
+    get_skater_workout_card_kb,
+    get_active_workout_kb,
+    WorkoutAction,
+)
+from calculator import calculate_current_workout_totals
 
 
 async def get_active_workout(session: AsyncSession) -> Workout | None:
@@ -126,3 +134,84 @@ def new_workout_now() -> Workout:
         status="active",
         pin_code=generate_workout_pin(),
     )
+
+
+async def show_skater_card_or_main_list(
+    callback: CallbackQuery, callback_data: WorkoutAction, session: AsyncSession
+):
+    """Ярус карточки спортсмена: показывает текущий лвл, опыт и предварительный балл.
+
+    Живет в helpers (а не в workout.py), чтобы другие модули (trick_flow,
+    combo_builder) могли импортировать ее напрямую без циклических импортов.
+    Если исходное сообщение удалено (поток «delete + answer» при вводе конусов),
+    edit_text падает — тогда карточка печатается новым сообщением внизу чата.
+    """
+    workout_id = callback_data.workout_id
+    student_id = callback_data.student_id
+
+    # Если student_id пустой — возвращаемся к главному списку тренировки
+    if not student_id:
+        current_students = await get_workout_students(session, workout_id)
+        await callback.message.edit_text(
+            "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nСписок спортсменов на занятии:",
+            reply_markup=get_active_workout_kb(workout_id, current_students),
+        )
+        return
+
+    # Если передан student_id — проверяем/создаем регистрацию на тренировку
+    reg = (
+        await session.execute(
+            select(WorkoutRegistration).where(
+                WorkoutRegistration.workout_id == workout_id,
+                WorkoutRegistration.student_id == student_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if not reg:
+        reg = WorkoutRegistration(workout_id=workout_id, student_id=student_id)
+        session.add(reg)
+        await session.commit()
+
+    student = await session.get(User, student_id)
+
+    # Тянем все логи трюков этого ученика за текущую сессию
+    logs = (
+        (
+            await session.execute(
+                select(TrickLog).where(
+                    TrickLog.workout_id == workout_id, TrickLog.student_id == student_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Калькуляция результатов «на лету»
+    current_sport_score, current_xp_gain = await calculate_current_workout_totals(
+        list(logs), student, session
+    )
+
+    card_text = (
+        f"👤 **Спортсмен:** {student.full_name}\n"
+        f"🎮 **Ранг:** {student.title} (Уровень: {student.level})\n"
+        f"✨ **Текущий опыт:** {student.xp} EXP\n\n"
+        f"📊 **Предварительные итоги сессии:**\n"
+        f" — Средний спортивный балл: <b>{current_sport_score}</b>\n"
+        f" — Набрано опыта за сегодня: <b>+{current_xp_gain} EXP</b>"
+    )
+
+    try:
+        await callback.message.edit_text(
+            text=card_text,
+            reply_markup=get_skater_workout_card_kb(workout_id, student_id, list(logs)),
+        )
+    except Exception:
+        # Сообщение могло быть удалено (например, после «delete + answer»
+        # в потоке ввода конусов) или не подлежать редактированию.
+        # Печатаем карточку новым сообщением внизу чата.
+        await callback.message.answer(
+            text=card_text,
+            reply_markup=get_skater_workout_card_kb(workout_id, student_id, list(logs)),
+        )
