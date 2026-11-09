@@ -51,7 +51,7 @@ async def show_handbook_tricks(
     builder = InlineKeyboardBuilder()
     for trick in tricks:
         builder.button(
-            text=f"{trick.name} (Tier {trick.trick_tier})",
+            text=f"{trick.name} ({trick.base_tech_points:.0f})",
             callback_data=HandbookAction(
                 action="hb_trick", category=callback_data.category, trick_id=trick.id
             ),

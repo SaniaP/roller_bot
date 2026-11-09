@@ -205,7 +205,7 @@ def get_tricks_by_cat_kb(
     builder = InlineKeyboardBuilder()
     for trick in tricks:
         builder.button(
-            text=f"{trick.name} (Tier {trick.trick_tier})",
+            text=f"{trick.name} ({trick.base_tech_points:.0f})",
             callback_data=TrickAction(
                 action="log_trick",
                 workout_id=workout_id,
