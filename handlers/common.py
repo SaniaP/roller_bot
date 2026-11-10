@@ -1,4 +1,5 @@
 import logging
+from html import escape
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -49,15 +50,19 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         
         # Отправляем запрос тренеру на одобрение заявки
         try:
+            safe_name = escape(full_name or "")
+            safe_username = escape(username) if username else "нет"
             await message.bot.send_message(
                 chat_id=CHIEF_COACH_ID,
-                text=f"🔔 **Новая заявка на регистрацию!**\n\n"
-                     f"Спортсмен: {full_name}\n"
-                     f"Username: @{username or 'нет'}\n"
-                     f"ID: `{tg_id}`\n\n"
-                     f"Разрешить ему доступ к тренировкам?",
+                text=(
+                    "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
+                    f"Спортсмен: {safe_name}\n"
+                    f"Username: @{safe_username}\n"
+                    f"ID: <code>{tg_id}</code>\n\n"
+                    "Разрешить ему доступ к тренировкам?"
+                ),
                 reply_markup=get_approve_user_kb(tg_id),
-                parse_mode="Markdown"
+                parse_mode="HTML",
             )
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление тренеру: {e}")
@@ -80,9 +85,10 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             select(Workout).where(Workout.status == "active")
         )).scalar_one_or_none()
         await message.answer(
-            f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{user.full_name}</b>!\n"
+            f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{escape(user.full_name or '')}</b>!\n"
             "Все судейские связки и лимиты опыта активны. Выберите действие:",
-            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None)
+            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None),
+            parse_mode="HTML",
         )
         return
 
@@ -93,17 +99,19 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         # Если спортсмен еще не одобрен тренером
         if not user.is_approved:
             await message.answer(
-                f"⏳ Привет, <b>{user.full_name}</b>!\n\n"
-                f"Ваша заявка всё ещё находится на рассмотрении у тренера.\n"
-                f"Пожалуйста, дождитесь подтверждения."
+                f"⏳ Привет, <b>{escape(user.full_name or '')}</b>!\n\n"
+                "Ваша заявка всё ещё находится на рассмотрении у тренера.\n"
+                "Пожалуйста, дождитесь подтверждения.",
+                parse_mode="HTML",
             )
         # Если одобрен — открываем доступ к панели управления
         else:
             await message.answer(
-                f"🛹 Привет, <b>{user.full_name}</b>!\n"
+                f"🛹 Привет, <b>{escape(user.full_name or '')}</b>!\n"
                 f"Твой текущий уровень: <b>{user.level}</b> лвл. Ты готов прокачаться?!\n"
                 "Выбирай действие на панели управления:",
-                reply_markup=get_student_main_menu()
+                reply_markup=get_student_main_menu(),
+                parse_mode="HTML",
             )
 
 @router.callback_query(F.data.startswith("approve_user:"))
@@ -124,7 +132,8 @@ async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
 
     # Убираем кнопки и сообщаем тренеру
     await callback.message.edit_text(
-        f"✅ Заявка <b>{user.full_name}</b> одобрена! Доступ к тренировкам открыт."
+        f"✅ Заявка <b>{escape(user.full_name or '')}</b> одобрена! Доступ к тренировкам открыт.",
+        parse_mode="HTML",
     )
     await callback.answer("Заявка одобрена!")
 
@@ -132,9 +141,12 @@ async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
     try:
         await callback.bot.send_message(
             chat_id=student_tg_id,
-            text=f"🎉 Отличные новости, <b>{user.full_name}</b>!\n"
-                 f"Тренер одобрил твою заявку! Теперь тебе доступно полное меню бота.",
-            reply_markup=get_student_main_menu()
+            text=(
+                f"🎉 Отличные новости, <b>{escape(user.full_name or '')}</b>!\n"
+                "Тренер одобрил твою заявку! Теперь тебе доступно полное меню бота."
+            ),
+            reply_markup=get_student_main_menu(),
+            parse_mode="HTML",
         )
     except Exception as e:
         logger.error(f"Не удалось уведомить ученика {student_tg_id} об одобрении: {e}")
@@ -158,7 +170,8 @@ async def reject_user_handler(callback: CallbackQuery, session: AsyncSession):
 
     # Убираем кнопки и сообщаем тренеру
     await callback.message.edit_text(
-        f"❌ Заявка <b>{full_name}</b> отклонена. Профиль удален из базы."
+        f"❌ Заявка <b>{escape(full_name or '')}</b> отклонена. Профиль удален из базы.",
+        parse_mode="HTML",
     )
     await callback.answer("Заявка отклонена.")
 
@@ -166,8 +179,10 @@ async def reject_user_handler(callback: CallbackQuery, session: AsyncSession):
     try:
         await callback.bot.send_message(
             chat_id=student_tg_id,
-            text=f"😔 К сожалению, тренер отклонил твою заявку.\n"
-                 f"Если это ошибка — свяжись с тренером и отправь /start заново."
+            text=(
+                "😔 К сожалению, тренер отклонил твою заявку.\n"
+                "Если это ошибка — свяжись с тренером и отправь /start заново."
+            ),
         )
     except Exception as e:
         logger.error(f"Не удалось уведомить ученика {student_tg_id} об отклонении: {e}")
@@ -201,10 +216,11 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         await session.commit() 
         
         await message.answer(
-            f"🔄 **РЕЖИМ ТЕСТИРОВАНИЯ: УЧЕНИК** 🛹\n\n"
-            f"Твоя роль в базе временно изменена на `student`.\n"
-            f"Теперь ты можешь проверить ввод PIN-кода и отправку трюков.",
-            reply_markup=get_student_main_menu()
+            "🔄 <b>РЕЖИМ ТЕСТИРОВАНИЯ: УЧЕНИК</b> 🛹\n\n"
+            "Твоя роль в базе временно изменена на <code>student</code>.\n"
+            "Теперь ты можешь проверить ввод PIN-кода и отправку трюков.",
+            reply_markup=get_student_main_menu(),
+            parse_mode="HTML",
         )
     else:
         user.role = "coach"
@@ -216,10 +232,11 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         )).scalar_one_or_none()
         
         await message.answer(
-            f"🔄 **РЕЖИМ ТЕСТИРОВАНИЯ: ТРЕНЕР** 👑\n\n"
-            f"Роль успешно возвращена на `coach`.\n"
-            f"Вам снова доступна панель управления процессом.",
-            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None)
+            "🔄 <b>РЕЖИМ ТЕСТИРОВАНИЯ: ТРЕНЕР</b> 👑\n\n"
+            "Роль успешно возвращена на <code>coach</code>.\n"
+            "Вам снова доступна панель управления процессом.",
+            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None),
+            parse_mode="HTML",
         )
 
 
@@ -243,9 +260,9 @@ async def simulate_new_user(message: Message, state: FSMContext, session: AsyncS
     await session.commit()
 
     await message.answer(
-        "🧪 **РЕЖИМ ТЕСТИРОВАНИЯ: НОВЫЙ ПОЛЬЗОВАТЕЛЬ**\n\n"
+        "🧪 <b>РЕЖИМ ТЕСТИРОВАНИЯ: НОВЫЙ ПОЛЬЗОВАТЕЛЬ</b>\n\n"
         "Твой профиль полностью удален из базы данных.\n"
         "Теперь отправь /start — бот пройдет весь путь регистрации заново: "
         "создаст новую заявку и отправит её тренеру на одобрение.",
-        parse_mode="Markdown"
+        parse_mode="HTML",
     )
