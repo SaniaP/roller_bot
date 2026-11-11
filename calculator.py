@@ -20,6 +20,12 @@ async def calculate_single_trick(
     """
     Рассчитывает спортивные баллы (points) и игровой опыт (EXP) за ОДИН подход трюка.
     """
+    # 0. Защита: количество конусов должно быть положительным числом.
+    # Без проверки quantity=0 обнуляет баллы (bonus_multiplier = 0/base),
+    # а отрицательное дает отрицательный bonus_multiplier -> отрицательный XP.
+    if quantity is None or quantity <= 0:
+        return 0.0, 0
+
     # 1. Выбираем коэффициент дорожки
     line_coeff = 1.0
     if cone_line == "50":
@@ -45,20 +51,23 @@ async def calculate_single_trick(
             math.sqrt(extra_cones) * trick.extra_bonus_pct
         )  # По умолчанию 0.05 (5%)
         bonus_multiplier += bonus_pct
+    elif trick.base_quantity > 0:
+        bonus_multiplier = max(0.0, quantity / trick.base_quantity)
 
     calculated_points = raw_points * bonus_multiplier
 
-    # 3. Расчет игрового опыта (EXP)
+    # 2. Расчет игрового опыта (EXP)
     raw_xp = (
         trick.base_xp * line_coeff * quantity * execution_multiplier * bonus_multiplier
     )
 
-    # Проверка разницы уровней (Спортсмен vs Тир трюка)
-    # Если уровень спортсмена выше тира трюка — применяем множитель штрафа из БД
+    # 3. Проверка разницы уровней (Спортсмен vs Тир трюка)
     level_diff = skater_level - trick.trick_tier
     xp_multiplier = 1.0
 
-    if level_diff > 0:
+    if level_diff > 9:
+        xp_multiplier = 0.01
+    elif level_diff > 0:
         penalty = await db_session.scalar(
             select(XpPenalty).where(XpPenalty.level_difference == level_diff)
         )
@@ -100,11 +109,12 @@ async def calculate_current_workout_totals(
     }
     categories_count = len(unique_categories)
 
-    # --- Группировка логов: связка (общий combo_id) дает ОДИН результат ---
-    # Логи, входящие в связку (combo_id не None и не '-'), НЕ считаются одиночными
-    # трюками и в results не попадают. Для каждой связки добавляется строго одна
-    # запись: балл последнего шага (шаги НЕ суммируются) и EXP, привязанный к
-    # итоговому спортивному баллу связки.
+    # --- Группировка логов: связки ---
+    # 1. Для СПОРТА: в топ-8 идут все выполненные элементы (одиночные трюки,
+    #    отдельные шаги связок + итоговый балл самой связки).
+    # 2. Для ОПЫТА: идут только одиночные трюки + один общий EXP за связку
+    #    (чтобы не было двойного начисления опыта за шаги комбо).
+
     combo_steps = {}
     for log in trick_logs:
         if log.combo_id and log.combo_id != "-":
@@ -149,19 +159,29 @@ async def calculate_current_workout_totals(
 
         # 2. Считаем динамическую пропорцию
         base_ratio = sum_base_xp / sum_base_tech if sum_base_tech else 1.0
-     
+
         # 3. Считаем среднее количество конусов
         avg_quantity = sum(s.quantity for s in steps) / len(steps) if steps else 0
 
-        # 4. Считаем чистый опыт связки по нашей формуле
-        raw_combo_xp = combo_points * base_ratio * avg_quantity * 1.5
+        # 4. Считаем чистый опыт связки по нашей формуле 1.4 +0.15 за каждый трюк в сязке
+        length_bonus = 1.0 + 0.15 * max(0, len(steps) - 1)
+        raw_combo_xp = combo_points * base_ratio * avg_quantity * 1.4 * length_bonus
 
-        # 3. Применяем штраф за уровень (остается как был)
-        last_trick = trick_by_id.get(steps[-1].trick_id)
+        # 5. Применяем штраф за уровень на основе СРЕДНЕГО тира всех трюков в связке
+        combo_tiers = [
+            trick_by_id[s.trick_id].trick_tier
+            for s in steps
+            if s.trick_id in trick_by_id
+        ]
+
         xp_multiplier = 1.0
-        if last_trick:
-            level_diff = skater.level - last_trick.trick_tier
-            if level_diff > 0:
+        if combo_tiers:
+            avg_tier = round(sum(combo_tiers) / len(combo_tiers))
+            level_diff = skater.level - avg_tier
+
+            if level_diff > 9:
+                xp_multiplier = 0.01
+            elif level_diff > 0:
                 penalty = await db_session.scalar(
                     select(XpPenalty).where(XpPenalty.level_difference == level_diff)
                 )
@@ -198,7 +218,7 @@ async def calculate_current_workout_totals(
         final_sport_score = round(avg_points, 2)
     else:
         final_sport_score = 0.0
-    
+
     # --- 2. ИГРОВОЙ РЕЖИМ (Расчет опыта) ---
     # Сортируем результаты по убыванию набранного опыта
     sorted_by_xp = sorted(xp_results, key=lambda r: r[1], reverse=True)

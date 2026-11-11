@@ -269,7 +269,8 @@ async def _combo_exp_map(
       combo_points = Result последнего шага (calculated_points + combo_bonus)
       base_ratio   = Σ(trick.base_xp) / Σ(trick.base_tech_points) по шагам связки
       avg_quantity = среднее количество конусов по шагам
-      raw_xp       = combo_points * base_ratio * avg_quantity * 1.5
+      raw_xp       = combo_points * base_ratio * avg_quantity * 1.4 * length_bonus,
+      length_bonus = 1.0 + 0.15 * (число_шагов - 1)  # бонус за длину связки
       xp           = int(raw_xp * штраф_за_уровень_последнего_шага)
     Возвращает {combo_id: xp}. Связки без шагов пропускаются."""
     combo_steps: dict[str, list[tuple[TrickLog, Trick]]] = {}
@@ -290,7 +291,8 @@ async def _combo_exp_map(
 
         avg_quantity = sum(log.quantity for log, _t in steps) / len(steps)
 
-        raw_xp = combo_points * base_ratio * avg_quantity * 1.5
+        length_bonus = 1.0 + 0.15 * max(0, len(steps) - 1)
+        raw_xp = combo_points * base_ratio * avg_quantity * 1.4 * length_bonus
 
         xp_multiplier = 1.0
         if last_trick is not None:

@@ -102,7 +102,11 @@ def parse_quantity_input(text: str):
     match = re.match(r"^(\d+)(?:,([+-]?\d+))?$", text)
     if not match:
         return None
-    return int(match.group(1)), match.group(2)
+    quantity = int(match.group(1))
+    if quantity <= 0:
+        # Ноль и отрицательные числа запрещены: количество конусов >= 1
+        return None
+    return quantity, match.group(2)
 
 
 def format_accuracy_text(percentage_mod: str | None) -> str:
