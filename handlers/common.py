@@ -8,23 +8,25 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from models import User, Workout
+from models import User, Workout, STATUS_ACTIVE
 from config import CHIEF_COACH_ID
 
-# Импортируем клавиатуры 
+# Импортируем клавиатуры
 from keyboards import get_coach_main_menu_sync
 from keyboards.coach_kb import get_approve_user_kb
 from keyboards.skater_kb import get_student_main_menu
+
 logger = logging.getLogger(__name__)
 
 router = Router()
+
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     """Хэндлер команды /start. Проверяет авторизацию или регистрирует спортсмена."""
     await state.clear()  # Сброс FSM для текущего юзера
     tg_id = message.from_user.id
-    
+
     # 1. Проверяем, есть ли пользователь в базе данных
     query = select(User).where(User.telegram_id == tg_id)
     result = await session.execute(query)
@@ -43,11 +45,11 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             full_name=full_name,
             role="student",
             is_approved=False,
-            level=1  # Стартовый уровень в RPG-системе
+            level=1,  # Стартовый уровень в RPG-системе
         )
         session.add(new_user)
         await session.commit()
-        
+
         # Отправляем запрос тренеру на одобрение заявки
         try:
             safe_name = escape(full_name or "")
@@ -81,13 +83,17 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     # ==========================================
     if user.role == "coach":
         # Проверяем, есть ли активная тренировка, чтобы показать кнопку «Продолжить»
-        active_w = (await session.execute(
-            select(Workout).where(Workout.status == "active")
-        )).scalar_one_or_none()
+        active_w = (
+            await session.execute(
+                select(Workout).where(Workout.status == STATUS_ACTIVE)
+            )
+        ).scalar_one_or_none()
         await message.answer(
             f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{escape(user.full_name or '')}</b>!\n"
             "Все судейские связки и лимиты опыта активны. Выберите действие:",
-            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None),
+            reply_markup=get_coach_main_menu_sync(
+                has_active_workout=active_w is not None
+            ),
             parse_mode="HTML",
         )
         return
@@ -114,17 +120,21 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
                 parse_mode="HTML",
             )
 
+
 @router.callback_query(F.data.startswith("approve_user:"))
 async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
     """Тренер одобряет заявку: юзер получает доступ к меню ученика"""
     student_tg_id = int(callback.data.split(":")[1])
 
-    user = (await session.execute(
-        select(User).where(User.telegram_id == student_tg_id)
-    )).scalar_one_or_none()
+    user = (
+        await session.execute(select(User).where(User.telegram_id == student_tg_id))
+    ).scalar_one_or_none()
 
     if not user:
-        await callback.answer("❌ Пользователь не найден в базе (возможно, удалил профиль).", show_alert=True)
+        await callback.answer(
+            "❌ Пользователь не найден в базе (возможно, удалил профиль).",
+            show_alert=True,
+        )
         return
 
     user.is_approved = True
@@ -157,9 +167,9 @@ async def reject_user_handler(callback: CallbackQuery, session: AsyncSession):
     """Тренер отклоняет заявку: юзер удаляется из базы"""
     student_tg_id = int(callback.data.split(":")[1])
 
-    user = (await session.execute(
-        select(User).where(User.telegram_id == student_tg_id)
-    )).scalar_one_or_none()
+    user = (
+        await session.execute(select(User).where(User.telegram_id == student_tg_id))
+    ).scalar_one_or_none()
 
     if user:
         full_name = user.full_name
@@ -195,7 +205,9 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
 
     # Жесткая проверка: пользоваться командой может ТОЛЬКО шеф
     if tg_id != CHIEF_COACH_ID:
-        await message.answer("⛔ Ошибка доступа. Данная команда предназначена только для разработчика/главного тренера.")
+        await message.answer(
+            "⛔ Ошибка доступа. Данная команда предназначена только для разработчика/главного тренера."
+        )
         return
 
     # Сбрасываем текущие состояния FSM, чтобы контексты тренировок не накладывались
@@ -212,9 +224,9 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
     # МЕНЯЕМ РОЛЬ НА ПРОТИВОПОЛОЖНУЮ
     if user.role == "coach":
         user.role = "student"
-        user.is_approved = True # Чтобы сразу иметь доступ к PIN-коду
-        await session.commit() 
-        
+        user.is_approved = True  # Чтобы сразу иметь доступ к PIN-коду
+        await session.commit()
+
         await message.answer(
             "🔄 <b>РЕЖИМ ТЕСТИРОВАНИЯ: УЧЕНИК</b> 🛹\n\n"
             "Твоя роль в базе временно изменена на <code>student</code>.\n"
@@ -224,18 +236,22 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         )
     else:
         user.role = "coach"
-        await session.commit() 
-        
+        await session.commit()
+
         # Проверяем активную тренировку для правильного отображения меню тренера
-        active_w = (await session.execute(
-            select(Workout).where(Workout.status == "active")
-        )).scalar_one_or_none()
-        
+        active_w = (
+            await session.execute(
+                select(Workout).where(Workout.status == STATUS_ACTIVE)
+            )
+        ).scalar_one_or_none()
+
         await message.answer(
             "🔄 <b>РЕЖИМ ТЕСТИРОВАНИЯ: ТРЕНЕР</b> 👑\n\n"
             "Роль успешно возвращена на <code>coach</code>.\n"
             "Вам снова доступна панель управления процессом.",
-            reply_markup=get_coach_main_menu_sync(has_active_workout=active_w is not None),
+            reply_markup=get_coach_main_menu_sync(
+                has_active_workout=active_w is not None
+            ),
             parse_mode="HTML",
         )
 
@@ -248,7 +264,9 @@ async def simulate_new_user(message: Message, state: FSMContext, session: AsyncS
     tg_id = message.from_user.id
 
     if tg_id != CHIEF_COACH_ID:
-        await message.answer("⛔ Ошибка доступа. Данная команда предназначена только для разработчика/главного тренера.")
+        await message.answer(
+            "⛔ Ошибка доступа. Данная команда предназначена только для разработчика/главного тренера."
+        )
         return
 
     # Сбрасываем FSM, чтобы не осталось контекста тренировок/регистраций

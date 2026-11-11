@@ -1,59 +1,70 @@
+import os
+import sys
+
+# Поднимаемся от файла вверх, пока не найдём models.py — это и есть корень проекта
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = _here
+while _root != os.path.dirname(_root):
+    if os.path.exists(os.path.join(_root, "models.py")):
+        break
+    _root = os.path.dirname(_root)
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
 import asyncio
-from sqlalchemy import delete, select, inspect
-# Импортируем вашу фабрику сессий
+from sqlalchemy import select, inspect, Integer, Boolean
+from sqlalchemy.orm import DeclarativeBase
+os.chdir(_root)
 from database import async_session
-# Импортируем модель User
 import models
 
+
 async def print_any_table(table_name: str, filter_column: str = None, filter_value: str = None):
-    # 1. Пытаемся найти модель по имени класса таблицы
     model = getattr(models, table_name, None)
-    if not model:
-        print(f"❌ Модель с именем '{table_name}' не найдена в модуле models.")
+    if model is None or not (isinstance(model, type) and issubclass(model, DeclarativeBase)):
+        print(f"❌ '{table_name}' не является моделью SQLAlchemy в модуле models.")
         return
 
-    # Получаем список ТОЛЬКО физических колонок модели
     mapper = inspect(model)
     columns = [col.key for col in mapper.columns]
 
-    # Проверка фильтра, если он передан
     if filter_column and filter_column not in columns:
         print(f"❌ В таблице '{table_name}' нет поля '{filter_column}'. Доступные поля: {', '.join(columns)}")
         return
 
     async with async_session() as session:
-        # 3. Строим запрос к базе данных
         stmt = select(model)
-        
-        # Если передан фильтр — добавляем WHERE
+
         if filter_column and filter_value is not None:
-            # Получаем сам объект колонки для фильтрации
             db_column = getattr(model, filter_column)
-            
-            # Приведение типов для поиска:
-            # Если колонка имеет тип Integer, пробуем сконвертировать строку от пользователя в int
-            from sqlalchemy import Integer
             if isinstance(db_column.type, Integer):
                 try:
                     filter_value = int(filter_value)
                 except ValueError:
                     print(f"❌ Значение '{filter_value}' невозможно привести к числу для поля '{filter_column}'.")
                     return
-            
+            elif isinstance(db_column.type, Boolean):
+                lowered = filter_value.strip().lower()
+                if lowered in ("true", "1", "да", "yes"):
+                    filter_value = True
+                elif lowered in ("false", "0", "нет", "no"):
+                    filter_value = False
+                else:
+                    print(f"❌ Значение '{filter_value}' не похоже на bool для поля '{filter_column}'.")
+                    return
             stmt = stmt.where(db_column == filter_value)
 
-        # Если у таблицы есть колонка 'id', сортируем по ней
         if "id" in columns:
             stmt = stmt.order_by(model.id)
-            
+
         result = await session.execute(stmt)
         rows = result.scalars().all()
 
         if not rows:
-            print(f"📭 Записей не найдено.")
+            print("📭 Записей не найдено.")
             return
 
-        # 4. Динамически рассчитываем ширину колонок на основе данных
+        # Динамически рассчитываем ширину колонок
         col_widths = {col: len(col) for col in columns}
         prepared_rows = []
 
@@ -61,7 +72,6 @@ async def print_any_table(table_name: str, filter_column: str = None, filter_val
             row_data = {}
             for col in columns:
                 val = getattr(row, col)
-                
                 if isinstance(val, bool):
                     val_str = "✅" if val else "❌"
                 elif val is None:
@@ -71,48 +81,46 @@ async def print_any_table(table_name: str, filter_column: str = None, filter_val
 
                 if len(val_str) > 30:
                     val_str = val_str[:27] + "..."
-                    
-                row_data[col] = val_str
 
+                row_data[col] = val_str
                 if len(val_str) > col_widths[col]:
                     col_widths[col] = len(val_str)
-                    
             prepared_rows.append(row_data)
 
-        # 5. Строим динамический формат для строки
         header_format = " ".join([f"{{:<{col_widths[col] + 2}}}" for col in columns])
-        total_width = sum(col_widths.values()) + (len(columns) * 2) - 1
+        total_width = sum(col_widths.values()) + (len(columns) * 2) + (len(columns) - 1)
         line = "=" * total_width
 
-        # 6. Вывод таблицы в консоль
         print(f"\n{line}")
         print(header_format.format(*[col.upper() for col in columns]))
         print(line)
-        
         for row_data in prepared_rows:
             print(header_format.format(*[row_data[col] for col in columns]))
-            
         print(f"{line}\nВсего выведено записей: {len(rows)}\n")
 
 
 async def main():
-    print("Доступные таблицы обычно соответствуют классам в файле models.py (например: User, Order, Product)")
+    print("Доступные таблицы обычно соответствуют классам в файле models.py (например: User, Order, Product)", flush=True)
     table_name = input("Введите имя таблицы (класса модели) для печати: ").strip()
-    
+
     if not table_name:
         return
-        
-    # Сначала выводим всю таблицу
+
     await print_any_table(table_name)
-    
-    # Предлагаем сделать точечный поиск
-    print("--- Поиск конкретной записи (необязательно) ---")
+
+    print("--- Поиск конкретной записи (необязательно) ---", flush=True)
     filter_column = input("Введите имя поля для фильтрации (или нажмите Enter для пропуска): ").strip()
-    
+
     if filter_column:
         filter_value = input(f"Введите искомое значение для поля '{filter_column}': ").strip()
-        print(f"\n🔍 Выполняю поиск в '{table_name}' где '{filter_column}' == '{filter_value}'...")
+        print(f"\n🔍 Выполняю поиск в '{table_name}' где '{filter_column}' == '{filter_value}'...", flush=True)
         await print_any_table(table_name, filter_column=filter_column, filter_value=filter_value)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        input("Нажмите Enter для выхода...")

@@ -198,7 +198,7 @@ async def calculate_current_workout_totals(
         final_sport_score = round(avg_points, 2)
     else:
         final_sport_score = 0.0
-    print(f"DEBUG: Весь список xp_results перед сортировкой: {xp_results}")
+    
     # --- 2. ИГРОВОЙ РЕЖИМ (Расчет опыта) ---
     # Сортируем результаты по убыванию набранного опыта
     sorted_by_xp = sorted(xp_results, key=lambda r: r[1], reverse=True)

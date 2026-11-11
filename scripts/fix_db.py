@@ -1,13 +1,19 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 """Скрипт для выполнения конкретных изменений в БД.
-Значения можно менять в секции CONFIG ниже."""
+Значения можно менять в секции CONFIG ниже.
+Каждое действие выполняется, только если соответствующий ID не None."""
 import asyncio
 from sqlalchemy import text
 from database import async_session
 
 # ============================================
 # КОНФИГУРАЦИЯ: измените значения здесь
-# подставить None если не хотим делать изменение пример "delete_user_id": None
+# подставить None если не хотим делать изменение, пример: "delete_user_id": None
 # ============================================
+
 CONFIG = {
     # 1. Удалить пользователя по ID
     "delete_user_id": None,
@@ -17,16 +23,15 @@ CONFIG = {
     "update_is_approved_value": True,  # True/False
 
     # 3. Обновить LEVEL и опыт для пользователя по ID
-    "update_xp_user_id": 2,
+    "update_xp_user_id": None,
     "update_xp_value": 0,
-    "update_level_value":1,
+    "update_level_value": 1,
 
-    # 4. Удалить TrickLog по параметрам
+    # 4. Удалить TrickLog по ID
     "delete_tricklog_id": None,
-    "delete_tricklog_workout_id": 1,
-    "delete_tricklog_student_id": 5,
 
-    # 5. Удалить workout.id=1 из TrickLog, WorkoutRegistration, WorkoutParticipant
+    # 5. Удалить тренировку целиком: сначала её логи и регистрации, потом саму запись
+    # (Таблицы workout_participants больше нет — участники хранятся в workout_registrations.)
     "delete_workout_id": None,
 }
 
@@ -55,15 +60,15 @@ async def apply_changes():
         if CONFIG["update_xp_user_id"]:
             uid = CONFIG["update_xp_user_id"]
             xp = CONFIG["update_xp_value"]
-            lvl = CONFIG["update_level_value"]  # Не забудьте добавить этот ключ в CONFIG
-            
+            lvl = CONFIG["update_level_value"]
+
             await session.execute(
                 text("UPDATE users SET xp = :xp, level = :lvl WHERE id = :uid"),
                 {"xp": xp, "lvl": lvl, "uid": uid},
             )
             print(f"Пользователь id={uid}: xp={xp}, level={lvl}")
 
-        # 4. Удаление TrickLog
+        # 4. Удаление TrickLog по ID
         if CONFIG["delete_tricklog_id"]:
             log_id = CONFIG["delete_tricklog_id"]
             await session.execute(
@@ -71,7 +76,7 @@ async def apply_changes():
             )
             print(f"Удален TrickLog с id={log_id}")
 
-        # 5. Удаление workout.id=1 из всех связанных таблиц
+        # 5. Удаление тренировки из всех связанных таблиц
         if CONFIG["delete_workout_id"]:
             wid = CONFIG["delete_workout_id"]
             await session.execute(
@@ -83,11 +88,6 @@ async def apply_changes():
                 {"wid": wid},
             )
             print(f"Удалены WorkoutRegistration с workout_id={wid}")
-            await session.execute(
-                text("DELETE FROM workout_participants WHERE workout_id = :wid"),
-                {"wid": wid},
-            )
-            print(f"Удалены WorkoutParticipant с workout_id={wid}")
             await session.execute(
                 text("DELETE FROM workouts WHERE id = :wid"), {"wid": wid}
             )

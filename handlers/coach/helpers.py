@@ -1,7 +1,7 @@
 ﻿"""Общие хелперы для хендлеров тренера."""
 
+import secrets
 import re
-import random
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from aiogram.types import CallbackQuery
 
-from models import User, Workout, WorkoutRegistration, Trick, TrickLog
+from models import User, Workout, WorkoutRegistration, Trick, TrickLog, STATUS_ACTIVE
 from keyboards.coach_kb import (
     get_coach_main_menu_sync,
     get_skater_workout_card_kb,
@@ -22,7 +22,7 @@ from calculator import calculate_current_workout_totals
 async def get_active_workout(session: AsyncSession) -> Workout | None:
     """Возвращает активную тренировку (status='active'), если она есть"""
     return (
-        await session.execute(select(Workout).where(Workout.status == "active"))
+        await session.execute(select(Workout).where(Workout.status == STATUS_ACTIVE))
     ).scalar_one_or_none()
 
 
@@ -61,8 +61,8 @@ async def get_trick_categories(session: AsyncSession) -> list[str]:
 
 
 def generate_workout_pin() -> str:
-    """Генерация уникального 4-значного PIN-кода"""
-    return str(random.randint(1000, 9999))
+    """Генерация 4-значного PIN-кода (криптостойкий ГСЧ)"""
+    return f"{secrets.randbelow(9000) + 1000}"
 
 
 def percentage_to_multiplier(pct: int) -> float:
@@ -70,20 +70,7 @@ def percentage_to_multiplier(pct: int) -> float:
     return max(0.0, 1.0 + pct / 100.0)
 
 
-def level_progress_percent(current_xp: int, current_level: int, next_reqs) -> float:
-    """Процент прогресса до следующего уровня.
-
-    next_reqs — запись LevelExperience для уровня level+1 (required_xp — суммарный
-    EXP, нужный для достижения следующего уровня). Прогресс считается от порога
-    ТЕКУЩЕГО уровня: (xp - required_xp[текущий]) / (required_xp[следующий] - required_xp[текущий]).
-    prev_reqs — запись LevelExperience текущего уровня (передается отдельно, т.к. хелпер не ходит в БД).
-    """
-    raise NotImplementedError
-
-
-def level_progress_percent(
-    current_xp: int, prev_required_xp: int, next_required_xp: int
-) -> float:
+def level_progress_percent(current_xp: int, prev_required_xp: int, next_required_xp: int) -> float:
     """Процент прогресса до следующего уровня.
 
     required_xp в level_experience — СУММАРНЫЙ опыт, нужный для достижения уровня.
@@ -131,7 +118,7 @@ def new_workout_now() -> Workout:
     """Создает объект новой активной тренировки с PIN-кодом"""
     return Workout(
         date=datetime.now(),
-        status="active",
+        status=STATUS_ACTIVE,
         pin_code=generate_workout_pin(),
     )
 

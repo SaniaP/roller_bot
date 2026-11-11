@@ -8,7 +8,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from models import User, Workout, WorkoutRegistration, TrickLog
+from models import (
+    User,
+    Workout,
+    WorkoutRegistration,
+    TrickLog,
+    STATUS_ACTIVE,
+    STATUS_CLOSED,
+)
 from states.workout_states import CoachWorkoutStates
 from keyboards.coach_kb import (
     get_active_workout_kb,
@@ -172,7 +179,7 @@ async def process_finish_workout(
 
     if not registrations:
         # Если на тренировку никто не записался, просто закрываем её
-        workout.status = "closed"
+        workout.status = STATUS_CLOSED
         await session.commit()
         await state.clear()
         await callback.message.delete()
@@ -248,7 +255,7 @@ async def process_finish_workout(
         )
 
     # Закрываем тренировку и сохраняем все изменения одним пакетом
-    workout.status = "closed"
+    workout.status = STATUS_CLOSED
     await session.commit()
 
     # Уведомляем всех записанных учеников и возвращаем их в главное меню

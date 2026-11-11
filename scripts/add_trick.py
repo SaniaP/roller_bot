@@ -1,3 +1,7 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 """Скрипт для добавления нового трюка в таблицу Trick."""
 import asyncio
 from database import async_session

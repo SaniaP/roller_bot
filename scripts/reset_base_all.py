@@ -1,3 +1,7 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 """
 Скрипт полной замены справочника трюков.
 
@@ -21,7 +25,7 @@ from sqlalchemy import delete, text
 from database import async_session, engine
 from models import User, Trick, TrickLog, Workout, WorkoutRegistration
 
-CSV_FILE_PATH = "tricks.csv"
+CSV_FILE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tricks.csv")
 
 
 async def import_tricks_from_csv():

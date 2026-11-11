@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, distinct
 
 # Твои реальные модели из проекта
-from models import User, Workout, WorkoutRegistration, Trick, TrickLog
+from models import User, Workout, WorkoutRegistration, Trick, TrickLog, STATUS_ACTIVE
 
 # Общая функция построения профиля + инлайн-кнопок деталей тренировок
 from handlers.coach.stats import (
@@ -93,7 +93,7 @@ async def student_process_pin(
 
     # Ищем активную тренировку по PIN
     query = select(Workout).where(
-        Workout.status == "active", Workout.pin_code == pin_input
+        Workout.status == STATUS_ACTIVE, Workout.pin_code == pin_input
     )
     active_workout = (await session.execute(query)).scalar_one_or_none()
 
@@ -210,7 +210,7 @@ async def student_start_combo(
 
     # Ищем активную тренировку ученика
     workout = (
-        await session.execute(select(Workout).where(Workout.status == "active"))
+        await session.execute(select(Workout).where(Workout.status == STATUS_ACTIVE))
     ).scalar_one_or_none()
     if not workout:
         await message.answer("❌ Нет активной тренировки.")
@@ -262,7 +262,7 @@ async def student_today_stats(
     ).scalar_one_or_none()
 
     # Ищем активную тренировку
-    workout_query = select(Workout).where(Workout.status == "active")
+    workout_query = select(Workout).where(Workout.status == STATUS_ACTIVE)
     active_workout = (await session.execute(workout_query)).scalar_one_or_none()
 
     if not active_workout:

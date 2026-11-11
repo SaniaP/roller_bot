@@ -1,4 +1,8 @@
-"""Скрипт для очистки таблиц: User, Workout, WorkoutRegistration, TrickLog, WorkoutParticipant.
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+"""Скрипт для очистки таблиц: User, Workout, WorkoutRegistration, TrickLog.
 Справочные таблицы (Trick, LevelExperience, XpPenalty) не удаляются."""
 import asyncio
 from sqlalchemy import text
@@ -17,8 +21,7 @@ async def clear_tables():
         print("Очистка WorkoutRegistration...")
         await session.execute(text("DELETE FROM workout_registrations"))
 
-        print("Очистка WorkoutParticipant...")
-        await session.execute(text("DELETE FROM workout_participants"))
+
 
         print("Очистка Workout...")
         await session.execute(text("DELETE FROM workouts"))

@@ -1,5 +1,5 @@
 from typing import Optional
-from datetime import datetime, date
+from datetime import datetime, timezone, date
 from sqlalchemy import (
     BigInteger,
     String,
@@ -12,6 +12,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from database import Base
+
+# Статусы тренировок — единые константы вместо строковых литералов по всему коду
+STATUS_ACTIVE = "active"
+STATUS_CLOSED = "closed"
 
 
 class User(Base):
@@ -90,14 +94,16 @@ class Workout(Base):
     __tablename__ = "workouts"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    date: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
     # Наш PIN, для самостоятельной работы
     pin_code: Mapped[Optional[str]] = mapped_column(
         String(4), unique=True, nullable=True, default=None
     )
     status: Mapped[str] = mapped_column(
-        String(20), default="ACTIVE"
-    )  # ACTIVE, FINISHED
+        String(20), default=STATUS_ACTIVE
+    )  # STATUS_ACTIVE, STATUS_CLOSED
 
 
 class WorkoutRegistration(Base):
@@ -146,11 +152,3 @@ class TrickLog(Base):
     calculated_xp: Mapped[int] = mapped_column(Integer)
     # Флаг: трюк отправлен учеником самостоятельно с устройства и ждет подтверждения тренера
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-# Таблица участников (кто к какой тренировке подключен)
-class WorkoutParticipant(Base):
-    __tablename__ = "workout_participants"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    workout_id: Mapped[int] = mapped_column(Integer, ForeignKey("workouts.id"))
-    student_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.telegram_id"))

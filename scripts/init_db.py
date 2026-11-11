@@ -1,3 +1,7 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 from database import engine, Base
 # Обязательно импортируем models, чтобы SQLAlchemy "увидела" наши таблицы перед созданием!

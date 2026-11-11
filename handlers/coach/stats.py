@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from models import (
+    STATUS_ACTIVE,
+    STATUS_CLOSED,
     User,
     Workout,
     WorkoutRegistration,
@@ -124,7 +126,7 @@ async def _workout_caused_level_up(
                 .where(
                     WorkoutRegistration.student_id == student.id,
                     WorkoutRegistration.workout_id != workout_id,
-                    Workout.status == "closed",
+                    Workout.status == STATUS_CLOSED,
                 )
             )
         )
@@ -439,7 +441,7 @@ async def build_student_profile_text(student: User, session: AsyncSession) -> st
         date_str = workout.date.strftime("%d.%m.%Y") if workout.date else "—"
         lvl_up_note = ""
         # Если после этой тренировки у ученика вырос уровень — фиксируем это в разбивке
-        if workout.status == "closed" and reg.training_xp:
+        if workout.status == STATUS_CLOSED and reg.training_xp:
             lvl_up_note = (
                 " 🔥"
                 if await _workout_caused_level_up(
@@ -555,7 +557,7 @@ async def stats_workout_details(
 
     # Добавляем пометку о повышении уровня, если оно было на этой тренировке
     if (
-        workout.status == "closed"
+        workout.status == STATUS_CLOSED
         and reg.training_xp
         and await _workout_caused_level_up(
             session, student, workout.id, reg.training_xp
