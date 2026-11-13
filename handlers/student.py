@@ -22,6 +22,7 @@ from models import User, Workout, WorkoutRegistration, Trick, TrickLog, STATUS_A
 from handlers.coach.stats import (
     build_student_profile_text,
     _workout_details_kb,
+    send_profile_message,
 )
 
 # как мы считаем если их не используем?)
@@ -35,7 +36,11 @@ from keyboards.skater_kb import (
     get_student_training_menu,
 )
 from keyboards.common_kb import HANDBOOK_BTN
-from handlers.coach.stats import build_student_profile_text
+from handlers.coach.stats import (
+    build_student_profile_text,
+    _workout_details_kb,
+    send_profile_message,
+)
 from handlers.coach.helpers import get_trick_categories
 from handlers.coach.handbook import _handbook_categories_kb
 from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_markup
@@ -404,7 +409,7 @@ async def student_show_handbook(message: Message, session: AsyncSession):
 
 @router.message(F.text == "👤 Мой персонаж")
 async def student_my_profile(message: Message, session: AsyncSession):
-    """Профиль ученика: BP, прогресс-бар и разбивка по тренировкам"""
+    """Профиль ученика: BP, прогресс-бар, разбивка по тренировкам + аватарка"""
     user = (
         await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
@@ -415,9 +420,4 @@ async def student_my_profile(message: Message, session: AsyncSession):
         await message.answer("❌ Ваша учетная запись еще не одобрена тренером.")
         return
 
-    text = await build_student_profile_text(user, session)
-    await message.answer(
-        text,
-        reply_markup=await _workout_details_kb(user, session),
-        parse_mode="HTML",
-    )
+    await send_profile_message(message.bot, message.chat.id, user, session)

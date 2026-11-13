@@ -27,10 +27,13 @@ from handlers.coach import (
 logger = logging.getLogger(__name__)
 
 router = Router()
+# stats раньше menu: его FSM-хэндлеры отмены («❌ Отмена» в состоянии ввода
+# даты/статуса профиля) должны перехватывать нажатие раньше общего
+# безстейт-хэндлера отмены из menu.py, который показывает меню тренера.
+router.include_router(stats.router)
 router.include_router(menu.router)
 router.include_router(handbook.router)
 router.include_router(workout.router)
 router.include_router(trick_flow.router)
 router.include_router(review.router)
-router.include_router(stats.router)
 router.include_router(combo_builder.router)

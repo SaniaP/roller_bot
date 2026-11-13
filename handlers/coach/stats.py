@@ -1,7 +1,19 @@
 ﻿"""Статистика: список учеников с сортировкой по уровню и профиль с разбивкой по тренировкам."""
 
+import logging
+from datetime import date, datetime
+
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from aiogram.filters.callback_data import CallbackData
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,10 +35,36 @@ from handlers.coach.helpers import (
     draw_progress_bar,
     level_progress_percent,
 )
+from keyboards.skater_kb import get_student_main_menu
 
 router = Router()
 
 TELEGRAM_TEXT_LIMIT = 4000  # запас ниже официального лимита 4096
+TELEGRAM_CAPTION_LIMIT = 1024  # лимит подписи к фото
+
+
+def calculate_age(born: date) -> int:
+    """Точный возраст с учетом месяца и дня рождения."""
+    today = date.today()
+    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+class ProfileStates(StatesGroup):
+    waiting_for_birthdate = State()
+    waiting_for_status = State()
+
+
+logger = logging.getLogger(__name__)
+
+CANCEL_PROFILE_INPUT_BTN = "❌ Отмена"
+
+
+def _profile_input_kb() -> ReplyKeyboardMarkup:
+    """Reply-клавиатура с кнопкой отмены для состояний ввода профиля"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=CANCEL_PROFILE_INPUT_BTN)]],
+        resize_keyboard=True,
+    )
 
 
 def fit_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
@@ -247,7 +285,7 @@ def build_workout_log_text(
 
     if singles:
         parts.append("<b>🎯 Одиночные трюки:</b>")
-        
+
         for log, trick in singles:
             mult_note = ""
             if log.execution_multiplier and log.execution_multiplier != 1.0:
@@ -419,7 +457,21 @@ def _workout_breakdown(
 async def build_student_profile_text(student: User, session: AsyncSession) -> str:
     """Полный текст профиля ученика: шапка с BP и баром + разбивка по тренировкам.
     Используется и тренерской статистикой, и кнопкой «Мой профиль» у ученика"""
+    # Получаем шапку, где содержатся Имя, Уровень, Рекорд и Прогресс-бар
     progress = await _progress_line(student, session)
+
+    # Формируем строку параметров (Возраст и Статус)
+    if student.birth_date:
+        age_str = f"📅 <b>Возраст:</b> {calculate_age(student.birth_date)} лет"
+    else:
+        age_str = "📅 <b>Возраст:</b> не указан"
+
+    if student.custom_status:
+        status_str = f"💬 <b>Статус:</b> <i>«{student.custom_status}»</i>"
+    else:
+        status_str = f"💬 <b>Статус:</b> {student.title}"
+
+    params_line = f"{age_str}\n{status_str}"
 
     # Все тренировки, где участвовал ученик (свежие сверху)
     regs = (
@@ -431,7 +483,8 @@ async def build_student_profile_text(student: User, session: AsyncSession) -> st
         )
     ).all()
 
-    parts = [progress, ""]
+    # params_line идет аккуратно под прогресс-баром
+    parts = [progress, params_line, ""]
 
     if not regs:
         parts.append("Тренировок пока не было.")
@@ -475,10 +528,11 @@ async def get_student_workout_ids(
 
 
 async def _workout_details_kb(
-    student: User, session: AsyncSession
+    student: User, session: AsyncSession, is_own_profile: bool = False
 ) -> InlineKeyboardMarkup:
     """Инлайн-кнопки: детальная разбивка по каждой тренировке ученика + кнопка назад.
-    «К списку учеников» — только тренеру (у ученика этот список недоступен)."""
+    «К списку учеников» — только тренеру (у ученика этот список недоступен).
+    is_own_profile=True — добавляет кнопки управления профилем самого ученика."""
     builder = InlineKeyboardBuilder()
     for workout_id, workout in await get_student_workout_ids(student, session):
         date_str = workout.date.strftime("%d.%m.%Y") if workout.date else "—"
@@ -495,8 +549,36 @@ async def _workout_details_kb(
             text="⬅️ К списку учеников",
             callback_data=StatsAction(action="stats_back"),
         )
+
+    # Кнопки управления собственным профилем (только для владельца)
+    if is_own_profile:
+        if not student.birth_date:
+            builder.row(
+                InlineKeyboardButton(
+                    text="📅 Указать дату рождения",
+                    callback_data="profile_set_birthdate",
+                )
+            )
+        if student.level >= 10:
+            builder.row(
+                InlineKeyboardButton(
+                    text="✍️ Изменить статус",
+                    callback_data="profile_set_status",
+                )
+            )
+
     builder.adjust(1)
     return builder.as_markup()
+
+
+async def _edit_profile_message(message: Message, text: str, reply_markup):
+    """Редактирует сообщение профиля: у фото-сообщения меняем caption, у текстового — text."""
+    if message.photo:
+        await message.edit_caption(
+            caption=text, reply_markup=reply_markup, parse_mode="HTML"
+        )
+    else:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 @router.callback_query(StatsAction.filter(F.action == "stats_student"))
@@ -510,10 +592,10 @@ async def stats_student_profile(
         return
 
     text = await build_student_profile_text(student, session)
-    await callback.message.edit_text(
+    await _edit_profile_message(
+        callback.message,
         text,
-        reply_markup=await _workout_details_kb(student, session),
-        parse_mode="HTML",
+        await _workout_details_kb(student, session),
     )
     await callback.answer()
 
@@ -572,9 +654,7 @@ async def stats_workout_details(
         text="⬅️ К профилю ученика",
         callback_data=StatsAction(action="stats_student", student_id=student.id),
     )
-    await callback.message.edit_text(
-        text, reply_markup=builder.as_markup(), parse_mode="HTML"
-    )
+    await _edit_profile_message(callback.message, text, builder.as_markup())
     await callback.answer()
 
 
@@ -604,3 +684,188 @@ async def stats_back_to_list(callback: CallbackQuery, session: AsyncSession):
         text, reply_markup=_students_kb(list(students)), parse_mode="HTML"
     )
     await callback.answer()
+
+
+async def send_profile_message(bot, chat_id: int, user: User, session: AsyncSession):
+    """Отправляет профиль с аватаркой (кэшируется в user.photo_file_id).
+    Текст <= 1024 симв. уходит в caption к фото, иначе — отдельным сообщением."""
+    text = await build_student_profile_text(user, session)
+    kb = await _workout_details_kb(user, session, is_own_profile=True)
+
+    file_id = user.photo_file_id
+
+    # Пробуем достать аватарку из Telegram, если она еще не закэширована
+    if not file_id:
+        try:
+            photos = await bot.get_user_profile_photos(
+                user_id=user.telegram_id, limit=1
+            )
+            if photos.total_count > 0:
+                photo = photos.photos[0][0]  # самый низкое разрешение из первой пачки
+                file_id = photo.file_id
+                user.photo_file_id = file_id
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Не удалось получить аватарку: {e}")
+
+    if file_id:
+        # Лимит caption — 1024 символа: длинный текст отправляем вторым сообщением
+        if len(text) <= TELEGRAM_CAPTION_LIMIT:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=file_id,
+                caption=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_photo(chat_id=chat_id, photo=file_id)
+            await bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML"
+            )
+    else:
+        await bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=kb, parse_mode="HTML"
+        )
+
+
+# =====================================================================
+# FSM: дата рождения и кастомный статус профиля
+# =====================================================================
+
+
+@router.callback_query(F.data == "profile_set_birthdate")
+async def profile_set_birthdate(callback: CallbackQuery, state: FSMContext):
+    """Запрашиваем дату рождения ученика"""
+    await state.set_state(ProfileStates.waiting_for_birthdate)
+    await callback.message.answer(
+        "📅 Напиши дату своего рождения в формате: ДД.ММ.ГГГГ (например, 15.03.2015)",
+        reply_markup=_profile_input_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(ProfileStates.waiting_for_birthdate, F.text == CANCEL_PROFILE_INPUT_BTN)
+async def profile_cancel_birthdate(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Отмена ввода даты рождения — возврат к профилю"""
+    await state.clear()
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    await message.answer("🚫 Ввод отменен.")
+    if user:
+        await send_profile_message(message.bot, message.chat.id, user, session)
+
+
+@router.message(ProfileStates.waiting_for_birthdate)
+async def profile_process_birthdate(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Валидация и сохранение даты рождения"""
+    text = (message.text or "").strip()
+    try:
+        born = datetime.strptime(text, "%d.%m.%Y").date()
+        today = date.today()
+        age = calculate_age(born)
+        if born > today or age > 100 or age < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Неверный формат даты. Попробуй еще раз (ДД.ММ.ГГГГ):")
+        return
+
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    if not user:
+        await state.clear()
+        await message.answer("❌ Профиль не найден.")
+        return
+
+    user.birth_date = born
+    await session.commit()
+    await state.clear()
+    await message.answer(
+        "✅ Дата рождения сохранена!",
+        reply_markup=get_student_main_menu(),
+    )
+
+    # Показываем обновленный профиль (с фото / каптионом / текстом)
+    await send_profile_message(message.bot, message.chat.id, user, session)
+
+
+@router.callback_query(F.data == "profile_set_status")
+async def profile_set_status(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+):
+    """Кастомный статус — только с 10 уровня"""
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+    ).scalar_one_or_none()
+
+    if not user or user.level < 10:
+        await callback.answer(
+            text="🔒 Кастомный статус доступен строго с 10-го уровня!",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(ProfileStates.waiting_for_status)
+    await callback.message.answer(
+        "Введите ваш новый статус (не более 45 символов):",
+        reply_markup=_profile_input_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(ProfileStates.waiting_for_status, F.text == CANCEL_PROFILE_INPUT_BTN)
+async def profile_cancel_status(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Отмена ввода статуса — возврат к профилю"""
+    await state.clear()
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    await message.answer("🚫 Ввод отменен.")
+    if user:
+        await send_profile_message(message.bot, message.chat.id, user, session)
+
+
+@router.message(ProfileStates.waiting_for_status)
+async def profile_process_status(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Валидация длины и сохранение кастомного статуса"""
+    text = (message.text or "").strip()
+    if len(text) > 45:
+        await message.answer(
+            "⚠️ Слишком длинно! Введите статус короче (не более 45 символов):"
+        )
+        return
+
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    if not user:
+        await state.clear()
+        await message.answer("❌ Профиль не найден.")
+        return
+
+    user.custom_status = text
+    await session.commit()
+    await state.clear()
+    await message.answer("✅ Статус обновлен!")
+
+    await send_profile_message(message.bot, message.chat.id, user, session)
