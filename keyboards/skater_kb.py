@@ -17,7 +17,7 @@ def get_student_main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="👤 Мой персонаж")],
             [KeyboardButton(text="🔑 Подключиться к тренировке")],
-            [KeyboardButton(text="📚 База трюков")],
+            [KeyboardButton(text="📚 База трюков"), KeyboardButton(text="📈 Рейтинги")],
         ],
         resize_keyboard=True,
     )

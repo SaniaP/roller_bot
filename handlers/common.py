@@ -15,6 +15,14 @@ from config import CHIEF_COACH_ID
 from keyboards import get_coach_main_menu_sync
 from keyboards.coach_kb import get_approve_user_kb
 from keyboards.skater_kb import get_student_main_menu
+from keyboards.common_kb import (
+    get_guest_menu,
+    get_request_registration_kb,
+    CALLBACK_SEND_REQUEST,
+    GUEST_REGISTER_BTN,
+    HANDBOOK_BTN,
+    RATINGS_BTN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +31,7 @@ router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
-    """Хэндлер команды /start. Проверяет авторизацию или регистрирует спортсмена."""
+    """Хэндлер команды /start. Проверяет авторизацию или показывает гостевое меню."""
     await state.clear()  # Сброс FSM для текущего юзера
     tg_id = message.from_user.id
 
@@ -33,53 +41,23 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     user = result.scalar_one_or_none()
 
     # ==========================================
-    # ЛОГИКА ДЛЯ АВТОРЕГИСТРАЦИИ НОВОГО СПОРТСМЕНА
+    # ГОСТЬ — НОВЫЙ ПОЛЬЗОВАТЕЛЬ (НЕ СОЗДАЕМ ЗАПИСЬ В БД)
     # ==========================================
     if user is None:
-        username = message.from_user.username
         full_name = message.from_user.full_name
-
-        # Создаем профиль спортсмена в БД со статусом НЕОДОБРЕН
-        new_user = User(
-            telegram_id=tg_id,
-            full_name=full_name,
-            role="student",
-            is_approved=False,
-            level=1,  # Стартовый уровень в RPG-системе
-        )
-        session.add(new_user)
-        await session.commit()
-
-        # Отправляем запрос тренеру на одобрение заявки
-        try:
-            safe_name = escape(full_name or "")
-            safe_username = escape(username) if username else "нет"
-            await message.bot.send_message(
-                chat_id=CHIEF_COACH_ID,
-                text=(
-                    "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
-                    f"Спортсмен: {safe_name}\n"
-                    f"Username: @{safe_username}\n"
-                    f"ID: <code>{tg_id}</code>\n\n"
-                    "Разрешить ему доступ к тренировкам?"
-                ),
-                reply_markup=get_approve_user_kb(tg_id),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление тренеру: {e}")
-
-        # Отвечаем новому спортсмену
         await message.answer(
-            f"Привет, {full_name}! 👋\n"
-            f"Я бот для ведения тренировок по фристайл-слалому.\n\n"
-            f"⏳ Ваша заявка отправлена тренеру на одобрение. "
-            f"Как только тренер подтвердит профиль, вы сможете подключаться к тренировкам по PIN-коду!"
+            f"👋 Привет, <b>{escape(full_name or '')}</b>!\n\n"
+            "🛼 Я бот школы фристайл-слалома!\n"
+            "Здесь ты ведёшь тренировки, копишь опыт и прокачиваешь своего персонажа.\n\n"
+            "✨ Чтобы начать путь, зарегистрируйся как спортсмен —\n"
+            "твоя заявка уйдет тренеру на одобрение.",
+            reply_markup=get_guest_menu(),
+            parse_mode="HTML",
         )
         return
 
     # ==========================================
-    # СТАРАЯ ЛОГИКА ТРЕНЕРА (ОСТАЛАСЬ БЕЗ ИЗМЕНЕНИЙ)
+    # ЛОГИКА ТРЕНЕРА (ОСТАЛАСЬ БЕЗ ИЗМЕНЕНИЙ)
     # ==========================================
     if user.role == "coach":
         # Проверяем, есть ли активная тренировка, чтобы показать кнопку «Продолжить»
@@ -108,6 +86,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
                 f"⏳ Привет, <b>{escape(user.full_name or '')}</b>!\n\n"
                 "Ваша заявка всё ещё находится на рассмотрении у тренера.\n"
                 "Пожалуйста, дождитесь подтверждения.",
+                reply_markup=get_guest_menu(),
                 parse_mode="HTML",
             )
         # Если одобрен — открываем доступ к панели управления
@@ -119,6 +98,120 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
                 reply_markup=get_student_main_menu(),
                 parse_mode="HTML",
             )
+
+
+# =====================================================================
+# ЗАЯВКА НА РЕГИСТРАЦИЮ (ГОСТЬ)
+# =====================================================================
+
+
+@router.message(F.text == GUEST_REGISTER_BTN)
+async def guest_register_request(message: Message, session: AsyncSession):
+    """Гость нажимает 'Зарегистрироваться как спортсмен' — отправляем Inline-приглашение."""
+    tg_id = message.from_user.id
+    user = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+
+    # Если заявка уже на рассмотрении — напоминаем
+    if user is not None and not user.is_approved:
+        await message.answer(
+            "⏳ Ваша заявка уже находится на рассмотрении у тренера.\n"
+            "Пожалуйста, дождитесь решения. 🙏"
+        )
+        return
+
+    # Если пользователь уже одобрен — просто показываем меню ученика
+    if user is not None and user.is_approved:
+        await message.answer(
+            "✅ Вы уже зарегистрированы и одобрены тренером!",
+            reply_markup=get_student_main_menu(),
+        )
+        return
+
+    # Гость еще не в базе — предлагаем отправить заявку красивым Inline-сообщением
+    await message.answer(
+        "🛼 <b>Хочешь тренироваться с нами?</b>\n\n"
+        "Отправь заявку тренеру — и после одобрения\n"
+        "тебе откроется доступ к тренировкам и персонажу. 🚀",
+        reply_markup=get_request_registration_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == CALLBACK_SEND_REQUEST)
+async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
+    """Гость нажал Inline-кнопку: создаем запись в users со статусом is_approved=False
+    и уведомляем главного тренера."""
+    tg_id = callback.from_user.id
+
+    user = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+
+    # Повторное нажатие, пока заявка на рассмотрении
+    if user is not None and not user.is_approved:
+        await callback.answer(
+            "⏳ Ваша заявка уже на рассмотрении у тренера. Дождитесь решения! 🙏",
+            show_alert=True,
+        )
+        return
+
+    # Если вдруг одобрен — просто уведомляем
+    if user is not None and user.is_approved:
+        await callback.answer("✅ Вы уже одобрены тренером!", show_alert=True)
+        return
+
+    # Создаем профиль спортсмена в БД со статусом НЕОДОБРЕН
+    new_user = User(
+        telegram_id=tg_id,
+        full_name=callback.from_user.full_name,
+        role="student",
+        is_approved=False,
+        level=1,  # Стартовый уровень в RPG-системе
+    )
+    session.add(new_user)
+    await session.commit()
+
+    # Отправляем запрос тренеру на одобрение заявки
+    try:
+        username = callback.from_user.username
+        safe_name = escape(callback.from_user.full_name or "")
+        safe_username = escape(username) if username else "нет"
+        await callback.bot.send_message(
+            chat_id=CHIEF_COACH_ID,
+            text=(
+                "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
+                f"Спортсмен: {safe_name}\n"
+                f"Username: @{safe_username}\n"
+                f"ID: <code>{tg_id}</code>\n\n"
+                "Разрешить ему доступ к тренировкам?"
+            ),
+            reply_markup=get_approve_user_kb(tg_id),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление тренеру: {e}")
+
+    await callback.answer("📨 Заявка отправлена тренеру!")
+    await callback.message.answer(
+        "⏳ Ваша заявка отправлена тренеру на одобрение.\n"
+        "Как только тренер подтвердит профиль, вы сможете подключаться к тренировкам!"
+    )
+
+
+# =====================================================================
+# ЗАГЛУШКИ ГОСТЯ
+# =====================================================================
+
+
+@router.message(F.text == RATINGS_BTN)
+async def guest_handbook_stub(message: Message):
+    """Заглушка: 'Рейтинги' — раздел в разработке."""
+    await message.answer(
+        "📈 Рейтинги — скоро здесь появится таблица лидеров!\n"
+        "(Раздел в разработке 🛠)"
+    )
 
 
 @router.callback_query(F.data.startswith("approve_user:"))

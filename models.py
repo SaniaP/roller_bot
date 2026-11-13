@@ -10,12 +10,31 @@ from sqlalchemy import (
     DateTime,
     Date,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
 
 # Статусы тренировок — единые константы вместо строковых литералов по всему коду
 STATUS_ACTIVE = "active"
 STATUS_CLOSED = "closed"
+
+
+# заполнена частично, по стостоянию на 12.11.26, заполнится при дабовлении нового тренера
+class CoachStudent(Base):
+    """Таблица связи между Тренерами и Учениками (Многие-ко-многим)"""
+
+    __tablename__ = "coach_student"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    coach_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+    # Обратные связи для SQLAlchemy
+    coach: Mapped["User"] = relationship(
+        "User", foreign_keys=[coach_id], back_populates="students"
+    )
+    student: Mapped["User"] = relationship(
+        "User", foreign_keys=[student_id], back_populates="coaches"
+    )
 
 
 class User(Base):
@@ -40,6 +59,17 @@ class User(Base):
     title: Mapped[str] = mapped_column(String(50), default="Новичок")
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     birth_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    custom_status: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )  # Пойдет в личный кабинет пользователя при достижении 10 уровня, юзер сам его установит или тренер
+
+    # Связи для мульти-тренерства, заложена архитектура на будующее
+    coaches: Mapped[list["CoachStudent"]] = relationship(
+        "CoachStudent", foreign_keys="CoachStudent.student_id", back_populates="student"
+    )
+    students: Mapped[list["CoachStudent"]] = relationship(
+        "CoachStudent", foreign_keys="CoachStudent.coach_id", back_populates="coach"
+    )
 
     @property  # встроенный дек-р, позволяющий пользоваться .is_coach, не держа в БД роль пользователя
     def is_coach(self) -> bool:

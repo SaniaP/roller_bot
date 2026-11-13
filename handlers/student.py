@@ -34,6 +34,7 @@ from keyboards.skater_kb import (
     get_student_main_menu,
     get_student_training_menu,
 )
+from keyboards.common_kb import HANDBOOK_BTN
 from handlers.coach.stats import build_student_profile_text
 from handlers.coach.helpers import get_trick_categories
 from handlers.coach.handbook import _handbook_categories_kb
@@ -381,7 +382,7 @@ async def student_leave_workout(message: Message, state: FSMContext):
 # =====================================================================
 
 
-@router.message(F.text == "📚 База трюков")
+@router.message(F.text == HANDBOOK_BTN)
 async def student_show_handbook(message: Message, session: AsyncSession):
     """База трюков для ученика — тот же справочник, что у тренера.
     Дальнейшая навигация (hb_cat / hb_trick / hb_back) обрабатывается
