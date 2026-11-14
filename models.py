@@ -59,9 +59,22 @@ class User(Base):
     title: Mapped[str] = mapped_column(String(50), default="Новичок")
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     birth_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    # === ЗРИТЕЛЬ (role='viewer') ===
+    # За каким спортсменом наблюдает (id из users). Заполняется только у зрителей
+    viewer_for_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Кем приходится спортсмену («мама», «папа», «тренер» и т.п.)
+    relation: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     custom_status: Mapped[Optional[str]] = mapped_column(
         String(100), nullable=True
     )  # Пойдет в личный кабинет пользователя при достижении 10 уровня, юзер сам его установит или тренер
+
+    # Спортсмен, за которым следит зритель
+    viewer_for: Mapped[Optional["User"]] = relationship(
+        "User", foreign_keys=[viewer_for_id], remote_side=[id]
+    )
 
     # Связи для мульти-тренерства, заложена архитектура на будующее
     coaches: Mapped[list["CoachStudent"]] = relationship(

@@ -5,21 +5,38 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from models import User, Workout, STATUS_ACTIVE
+from models import STATUS_ACTIVE, User, Workout, WorkoutRegistration
 from config import CHIEF_COACH_ID
 
 # Импортируем клавиатуры
 from keyboards import get_coach_main_menu_sync
 from keyboards.coach_kb import get_approve_user_kb
 from keyboards.skater_kb import get_student_main_menu
+from states.workout_states import StudentWorkoutStates, CoachWorkoutStates
+from states.skater_states import (
+    SkaterRegistrationStates,
+    SkaterWorkoutStates,
+    StudentStates,
+)
+from states.coach_states import (
+    CoachRegistrationStates,
+    WorkoutCreationStates,
+    ComboBuilderStates,
+    WorkoutVerificationStates,
+)
 from keyboards.common_kb import (
     get_guest_menu,
+    get_role_choice_kb,
     get_request_registration_kb,
     CALLBACK_SEND_REQUEST,
+    CALLBACK_REG_ROLE_SKATER,
+    CALLBACK_REG_ROLE_VIEWER,
     GUEST_REGISTER_BTN,
+    VIEWER_WATCH_BTN,
     HANDBOOK_BTN,
     RATINGS_BTN,
 )
@@ -49,8 +66,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             f"👋 Привет, <b>{escape(full_name or '')}</b>!\n\n"
             "🛼 Я бот школы фристайл-слалома!\n"
             "Здесь ты ведёшь тренировки, копишь опыт и прокачиваешь своего персонажа.\n\n"
-            "✨ Чтобы начать путь, зарегистрируйся как спортсмен —\n"
-            "твоя заявка уйдет тренеру на одобрение.",
+            "✨ Чтобы начать путь, зарегистрируйся —\n"
+            "заявка уйдет тренеру на одобрение.",
             reply_markup=get_guest_menu(),
             parse_mode="HTML",
         )
@@ -77,16 +94,25 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         return
 
     # ==========================================
-    # ЛОГИКА ДЛЯ СУЩЕСТВУЮЩИХ СПОРТСМЕНОВ
+    # ЛОГИКА ДЛЯ СУЩЕСТВУЮЩИХ СПОРТСМЕНОВ И ЗРИТЕЛЕЙ
     # ==========================================
     else:
-        # Если спортсмен еще не одобрен тренером
+        # Если пользователь еще не одобрен тренером (спортсмен или зритель)
         if not user.is_approved:
             await message.answer(
                 f"⏳ Привет, <b>{escape(user.full_name or '')}</b>!\n\n"
                 "Ваша заявка всё ещё находится на рассмотрении у тренера.\n"
                 "Пожалуйста, дождитесь подтверждения.",
                 reply_markup=get_guest_menu(),
+                parse_mode="HTML",
+            )
+        # Одобренный зритель — меню с рейтингом (полный доступ)
+        elif user.role == "viewer":
+            await message.answer(
+                f"👀 С возвращением, <b>{escape(user.full_name or '')}</b>!\n\n"
+                "Вы подтверждены как зритель. Полный рейтинг доступен "
+                "через кнопку «📈 Рейтинги».",
+                reply_markup=get_guest_menu(is_viewer=True),
                 parse_mode="HTML",
             )
         # Если одобрен — открываем доступ к панели управления
@@ -107,7 +133,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
 
 @router.message(F.text == GUEST_REGISTER_BTN)
 async def guest_register_request(message: Message, session: AsyncSession):
-    """Гость нажимает 'Зарегистрироваться как спортсмен' — отправляем Inline-приглашение."""
+    """Гость нажимает 'Зарегистрироваться' — предлагаем выбрать роль."""
     tg_id = message.from_user.id
     user = (
         await session.execute(select(User).where(User.telegram_id == tg_id))
@@ -123,20 +149,215 @@ async def guest_register_request(message: Message, session: AsyncSession):
 
     # Если пользователь уже одобрен — просто показываем меню ученика
     if user is not None and user.is_approved:
-        await message.answer(
-            "✅ Вы уже зарегистрированы и одобрены тренером!",
-            reply_markup=get_student_main_menu(),
-        )
+        if user.role == "viewer":
+            # Зрителю не показываем «меню спортсмена»: возвращаем зрительское меню
+            await message.answer(
+                "👀 Вы уже зарегистрированы как зритель и одобрены тренером.\n"
+                "Полный рейтинг доступен через кнопку «📈 Рейтинги»,\n"
+                "а профиль наблюдаемого спортсмена — через «👤 Наблюдать за персонажем».",
+                reply_markup=get_guest_menu(is_viewer=True),
+            )
+        else:
+            await message.answer(
+                "✅ Вы уже зарегистрированы и одобрены тренером!",
+                reply_markup=get_student_main_menu(),
+            )
         return
 
-    # Гость еще не в базе — предлагаем отправить заявку красивым Inline-сообщением
+    # Гость еще не в базе — предлагаем выбрать роль
     await message.answer(
+        "🛼 <b>Хочешь присоединиться к школе фристайл-слалома?</b>\n\n"
+        "Выбери свою роль:",
+        reply_markup=get_role_choice_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == CALLBACK_REG_ROLE_SKATER)
+async def guest_pick_skater(callback: CallbackQuery):
+    """Гость выбрал [Спортсмен] — стандартный сценарий заявки тренеру."""
+    await callback.message.edit_text(
         "🛼 <b>Хочешь тренироваться с нами?</b>\n\n"
         "Отправь заявку тренеру — и после одобрения\n"
         "тебе откроется доступ к тренировкам и персонажу. 🚀",
         reply_markup=get_request_registration_kb(),
         parse_mode="HTML",
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == CALLBACK_REG_ROLE_VIEWER)
+async def guest_pick_viewer(callback: CallbackQuery, state: FSMContext):
+    """Гость выбрал [Зритель] — запрашиваем, за кем он наблюдает."""
+    await state.set_state(StudentStates.waiting_for_viewer_target)
+    await callback.message.edit_text(
+        "👀 <b>Регистрация зрителя</b>\n\n"
+        "Укажите спортсмена, за кем вы наблюдаете — напишите его "
+        "<b>Фамилию и Имя</b> (как записан у тренера).\n\n"
+        "После подтверждения тренером вам откроется полный рейтинг."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == CALLBACK_REG_ROLE_VIEWER)
+async def guest_pick_viewer(callback: CallbackQuery, state: FSMContext):
+    """Гость выбрал [Зритель] — запрашиваем, за кем он наблюдает."""
+    await state.set_state(StudentStates.waiting_for_viewer_target)
+    await callback.message.edit_text(
+        "👀 <b>Регистрация зрителя</b>\n\n"
+        "Укажите спортсмена, за кем вы наблюдаете — напишите его "
+        "<b>Фамилию и Имя</b> (как записан у тренера).\n\n"
+        "После подтверждения тренером вам откроется полный рейтинг."
+    )
+    await callback.answer()
+
+
+@router.message(StudentStates.waiting_for_viewer_target, F.text == "❌ Отмена")
+async def viewer_reg_cancel(message: Message, state: FSMContext):
+    """Отмена регистрации зрителя."""
+    await state.clear()
+    await message.answer("🚫 Регистрация отменена.", reply_markup=get_guest_menu())
+
+
+@router.message(StudentStates.waiting_for_viewer_target)
+async def viewer_reg_target(message: Message, state: FSMContext, session: AsyncSession):
+    """Зритель ввел ФИО спортсмена — проверяем, что такой одобренный спортсмен есть."""
+    target_name = (message.text or "").strip()
+
+    athlete = (
+        await session.execute(
+            select(User).where(
+                User.full_name == target_name,
+                User.role == "student",
+                User.is_approved == True,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+
+    if not athlete:
+        await message.answer(
+            "❌ Спортсмен с таким именем не найден среди одобренных.\n"
+            "Проверьте написание (Фамилия и Имя) и отправьте еще раз,\n"
+            "или нажмите «❌ Отмена»."
+        )
+        return
+
+    if athlete.telegram_id == message.from_user.id:
+        await message.answer(
+            "🤔 Вы и есть этот спортсмен? Тогда зарегистрируйтесь как спортсмен."
+        )
+        return
+
+    await state.update_data(viewer_target_id=athlete.id)
+    await state.set_state(StudentStates.waiting_for_viewer_relation)
+    await message.answer(
+        f"✅ Спортсмен найден: <b>{escape(athlete.full_name or '')}</b>.\n\n"
+        "Кем вы приходитесь этому спортсмену, а так же как вас зовут?\n"
+        "Напишите одним сообщением, например: «мама, Ева», «папа, Адам», «лучший друг, Боря»."
+    )
+
+
+@router.message(StudentStates.waiting_for_viewer_relation)
+async def viewer_reg_relation(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Зритель указал родство — создаем НЕодобренную запись role='viewer'
+    и отправляем запрос тренеру на подтверждение."""
+    data = await state.get_data()
+    target_id = data.get("viewer_target_id")
+    relation = (message.text or "").strip()
+    await state.clear()
+
+    if not target_id:
+        await message.answer("⚠️ Ошибка сценария. Отправьте /start заново.")
+        return
+
+    tg_id = message.from_user.id
+    existing = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+    if existing:
+        await message.answer("⏳ Ваша заявка уже на рассмотрении у тренера. 🙏")
+        return
+
+    athlete = await session.get(User, target_id)
+    if not athlete:
+        await message.answer("❌ Спортсмен не найден. Отправьте /start заново.")
+        return
+
+    # Зритель попадает в базу только ПОСЛЕ подтверждения тренером:
+    # запись создаем неодобренной (is_approved=False), роль viewer.
+    new_viewer = User(
+        telegram_id=tg_id,
+        full_name=message.from_user.full_name or "Зритель",
+        role="viewer",
+        is_approved=False,
+        viewer_for_id=athlete.id,
+        relation=relation,
+        level=1,
+    )
+    session.add(new_viewer)
+    await session.commit()
+
+    # Запрос тренеру на подтверждение зрителя
+    try:
+        username = message.from_user.username
+        safe_viewer = escape(new_viewer.full_name or "")
+        safe_athlete = escape(athlete.full_name or "")
+        safe_username = escape(username) if username else "нет"
+        await message.bot.send_message(
+            chat_id=CHIEF_COACH_ID,
+            text=(
+                "🔔 <b>Новая заявка: ЗРИТЕЛЬ!</b>\n\n"
+                f"Зритель: <a href='tg://user?id={tg_id}'>{safe_viewer}</a>\n"
+                # f"Зритель: {safe_viewer}\n"
+                f"Username: @{safe_username}\n"
+                f"ID: <code>{tg_id}</code>\n"
+                f"Наблюдает за: {safe_athlete}\n"
+                f"Кем приходится: {escape(relation)}\n\n"
+                "Подтвердить доступ к полному рейтингу?"
+            ),
+            reply_markup=get_approve_user_kb(tg_id),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить запрос по зрителю тренеру: {e}")
+
+    await message.answer(
+        "📨 Заявка зрителя отправлена тренеру.\n"
+        "До одобрения вам доступен только ТОП-10 рейтинга.\n"
+        "После подтверждения откроется полный рейтинг. 🙏",
+        reply_markup=get_guest_menu(),
+    )
+
+
+@router.message(F.text == VIEWER_WATCH_BTN)
+async def viewer_watch_profile(message: Message, session: AsyncSession):
+    """Зритель: профиль спортсмена, за которым он наблюдает (как «Мой персонаж»)."""
+    from handlers.coach.stats import send_profile_message as _send_profile
+
+    tg_id = message.from_user.id
+    user = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+
+    # Доступно только одобренному зрителю
+    if not user or user.role != "viewer" or not user.is_approved:
+        await message.answer("🔒 Эта кнопка доступна только подтвержденным зрителям.")
+        return
+
+    athlete = None
+    if user.viewer_for_id:
+        athlete = await session.get(User, user.viewer_for_id)
+
+    if not athlete:
+        await message.answer(
+            "😔 Спортсмен, за которым вы наблюдаете, больше не найден в базе.\n"
+            "Свяжитесь с тренером, чтобы переназначить наблюдение."
+        )
+        return
+
+    await _send_profile(message.bot, message.chat.id, athlete, session)
 
 
 @router.callback_query(F.data == CALLBACK_SEND_REQUEST)
@@ -182,7 +403,8 @@ async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
             chat_id=CHIEF_COACH_ID,
             text=(
                 "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
-                f"Спортсмен: {safe_name}\n"
+                f"Спортсмен: <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
+                # f"Спортсмен: {safe_name}\n"
                 f"Username: @{safe_username}\n"
                 f"ID: <code>{tg_id}</code>\n\n"
                 "Разрешить ему доступ к тренировкам?"
@@ -205,13 +427,9 @@ async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
 # =====================================================================
 
 
-@router.message(F.text == RATINGS_BTN)
-async def guest_handbook_stub(message: Message):
-    """Заглушка: 'Рейтинги' — раздел в разработке."""
-    await message.answer(
-        "📈 Рейтинги — скоро здесь появится таблица лидеров!\n"
-        "(Раздел в разработке 🛠)"
-    )
+# «📈 Рейтинги» реализован в handlers/coach/stats.py (роутер тренера
+# регистрируется раньше common): гостям — текстовый ТОП-10,
+# авторизованным — интерактивные фильтры.
 
 
 @router.callback_query(F.data.startswith("approve_user:"))
@@ -233,22 +451,40 @@ async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
     user.is_approved = True
     await session.commit()
 
+    is_viewer = user.role == "viewer"
+
     # Убираем кнопки и сообщаем тренеру
     await callback.message.edit_text(
-        f"✅ Заявка <b>{escape(user.full_name or '')}</b> одобрена! Доступ к тренировкам открыт.",
+        (
+            f"✅ Зритель <b>{escape(user.full_name or '')}</b> подтвержден! "
+            "Доступ к полному рейтингу открыт."
+            if is_viewer
+            else f"✅ Заявка <b>{escape(user.full_name or '')}</b> одобрена! Доступ к тренировкам открыт."
+        ),
         parse_mode="HTML",
     )
     await callback.answer("Заявка одобрена!")
 
-    # Уведомляем ученика, что его одобрили
+    # Уведомляем ученика/зрителя, что его одобрили
     try:
         await callback.bot.send_message(
             chat_id=student_tg_id,
             text=(
-                f"🎉 Отличные новости, <b>{escape(user.full_name or '')}</b>!\n"
-                "Тренер одобрил твою заявку! Теперь тебе доступно полное меню бота."
+                (
+                    f"🎉 Отличные новости, <b>{escape(user.full_name or '')}</b>!\n"
+                    "Тренер подтвердил вас как зрителя! Теперь вам доступен "
+                    "полный рейтинг — через кнопку «📈 Рейтинги»."
+                    "и функция «👤 Наблюдать за персонажем»."
+                )
+                if is_viewer
+                else (
+                    f"🎉 Отличные новости, <b>{escape(user.full_name or '')}</b>!\n"
+                    "Тренер одобрил твою заявку! Теперь тебе доступно полное меню бота."
+                )
             ),
-            reply_markup=get_student_main_menu(),
+            reply_markup=(
+                get_guest_menu(is_viewer=True) if is_viewer else get_student_main_menu()
+            ),
             parse_mode="HTML",
         )
     except Exception as e:
@@ -303,9 +539,6 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         )
         return
 
-    # Сбрасываем текущие состояния FSM, чтобы контексты тренировок не накладывались
-    await state.clear()
-
     # Ищем твой профиль в БД
     query = select(User).where(User.telegram_id == tg_id)
     user = (await session.execute(query)).scalar_one_or_none()
@@ -313,6 +546,34 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
     if not user:
         await message.answer("❌ Сначала зарегистрируйтесь в боте через команду /start")
         return
+
+    # ПОЛНАЯ зачистка FSM-состояний: своя + все известные машины состояний
+    # (хэндлеры в разных модулях сидят в разных StatesGroup — простого
+    # state.clear() мало, часть сценариев "залипала")
+    await state.clear()
+    bot_id = message.bot.id
+    for group in (
+        StudentWorkoutStates,
+        CoachWorkoutStates,
+        SkaterRegistrationStates,
+        SkaterWorkoutStates,
+        StudentStates,
+        CoachRegistrationStates,
+        WorkoutCreationStates,
+        ComboBuilderStates,
+        WorkoutVerificationStates,
+    ):
+        stub = FSMContext(
+            storage=state.storage,
+            key=StorageKey(bot_id=bot_id, chat_id=tg_id, user_id=tg_id),
+        )
+        await stub.set_state(None)
+    # Чистим и данные, и сам state-ключ на всякий случай
+    stub = FSMContext(
+        storage=state.storage,
+        key=StorageKey(bot_id=bot_id, chat_id=tg_id, user_id=tg_id),
+    )
+    await stub.set_data({})
 
     # МЕНЯЕМ РОЛЬ НА ПРОТИВОПОЛОЖНУЮ
     if user.role == "coach":
@@ -329,6 +590,18 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         )
     else:
         user.role = "coach"
+
+        # Если тренер «застрял» в роли ученика с активной тренировкой —
+        # убираем его регистрацию из активной тренировки, чтобы не блокировать старт новой
+        if active_reg_id := await session.scalar(
+            select(WorkoutRegistration.id).where(
+                WorkoutRegistration.student_id == user.id,
+                Workout.status == STATUS_ACTIVE,
+            )
+        ):
+            reg = await session.get(WorkoutRegistration, active_reg_id)
+            if reg:
+                await session.delete(reg)
         await session.commit()
 
         # Проверяем активную тренировку для правильного отображения меню тренера

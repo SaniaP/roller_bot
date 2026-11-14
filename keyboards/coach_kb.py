@@ -58,7 +58,10 @@ def get_coach_main_menu_sync(has_active_workout: bool) -> ReplyKeyboardMarkup:
         KeyboardButton(text="👤 Добавить ученика"),
         KeyboardButton(text="📚 Справочник трюков"),
     )
-    builder.row(KeyboardButton(text="📊 Статистика"))
+    builder.row(
+        KeyboardButton(text="📊 Статистика"),
+        KeyboardButton(text="🏆 Рейтинг"),
+    )
     return builder.as_markup(resize_keyboard=True)
 
 

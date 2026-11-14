@@ -17,4 +17,6 @@ class StudentStates(StatesGroup):
     waiting_for_pin = State()        # Ожидание ввода PIN-кода для входа
     training_active = State()        # Находится на тренировке (главный экран сессии)
     waiting_for_distance = State()   # Ожидание выбора дорожки (50, 80, 120)
-    waiting_for_cones = State()      # Ожидание ввода количества конусов    
+    waiting_for_cones = State()      # Ожидание ввода количества конусов
+    waiting_for_viewer_target = State()  # Зритель: вводит ФИО спортсмена, за кем наблюдает
+    waiting_for_viewer_relation = State()  # Зритель: кем приходится спортсмену    

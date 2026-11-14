@@ -19,6 +19,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
+from config import CHIEF_COACH_ID
 from models import (
     STATUS_ACTIVE,
     STATUS_CLOSED,
@@ -90,6 +91,18 @@ class StatsAction(CallbackData, prefix="stat"):
     workout_id: int = 0
 
 
+def _stats_keyboard(students: list[User]) -> InlineKeyboardMarkup:
+    """Клавиатура 'Статистики': кнопки учеников."""
+    builder = InlineKeyboardBuilder()
+    for st in students:
+        builder.button(
+            text=f"{st.full_name} (Ур. {st.level})",
+            callback_data=StatsAction(action="stats_student", student_id=st.id),
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def _students_kb(students: list[User]) -> InlineKeyboardMarkup:
     """Инлайн-кнопки с именами учеников"""
     builder = InlineKeyboardBuilder()
@@ -100,6 +113,256 @@ def _students_kb(students: list[User]) -> InlineKeyboardMarkup:
         )
     builder.adjust(1)
     return builder.as_markup()
+
+
+# =====================================================================
+# 📈 Рейтинги: универсальный рейтинг с интерактивными фильтрами
+# =====================================================================
+
+
+def _years_ago(base: date, years: int) -> date:
+    """Дата 'base' минус N лет (с поправкой на 29 февраля)."""
+    try:
+        return base.replace(year=base.year - years)
+    except ValueError:  # 29 февраля -> 28 февраля
+        return base.replace(year=base.year - years, day=28)
+
+
+async def build_rating_text(
+    session: AsyncSession,
+    sort: str,
+    age: str,
+    rank: str,
+    limit: int | None = None,
+) -> str:
+    """Универсальный текст рейтинга учеников с фильтрами сортировки,
+    возраста и ранга. limit (например 10) — жесткое ограничение для гостей."""
+    query = select(User).where(
+        User.role == "student",
+        User.is_approved == True,  # noqa: E712
+    )
+
+    # Фильтр ранга
+    if rank == "novice":
+        query = query.where(User.title == "Новичок")
+
+    # Фильтр возраста (birth_date == None попадает только в "all")
+    if age != "all":
+        today = date.today()
+        if age == "kids":
+            query = query.where(User.birth_date >= _years_ago(today, 7))
+        elif age == "teens":
+            query = query.where(
+                User.birth_date.between(_years_ago(today, 17), _years_ago(today, 8))
+            )
+        elif age == "adults":
+            query = query.where(User.birth_date < _years_ago(today, 18))
+
+    # Сортировка
+    if sort == "exp":
+        query = query.order_by(User.level.desc(), User.xp.desc())
+
+    if limit:
+        query = query.limit(limit)
+
+    students = (await session.execute(query)).scalars().all()
+
+    if not students:
+        return "📈 <b>Рейтинг учеников</b>\n\nПока никого нет по выбранным фильтрам."
+
+    # Для сортировки по очкам пересортировываем средствами Python по BP
+    if sort == "score":
+        scored = [
+            (st, await _best_training_points(session, st.id) or 0.0) for st in students
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        students = [st for st, _bp in scored]
+
+    titles = {
+        "exp": "сортировка по EXP",
+        "score": "сортировка по очкам",
+    }
+    lines = [f"📈 <b>Рейтинг учеников</b> ({titles.get(sort, sort)})\n"]
+
+    for i, st in enumerate(students, start=1):
+        best_points = await _best_training_points(session, st.id)
+        bp = f"{best_points:.1f}" if best_points is not None else "—"
+        next_reqs = await session.get(LevelExperience, st.level + 1)
+        if next_reqs:
+            cur_reqs = await session.get(LevelExperience, st.level)
+            prev_xp = cur_reqs.required_xp if cur_reqs else 0
+            percent = level_progress_percent(st.xp, prev_xp, next_reqs.required_xp)
+            bar = draw_progress_bar(percent)
+        else:
+            bar = "🏆 Максимальный уровень достигнут!"
+        lines.append(
+            f"{i}. 👤 <b>{st.full_name}</b> - {st.level} LVL, BP : {bp}\n" f"{bar}"
+        )
+
+    return "\n".join(lines)
+
+
+def build_rating_keyboard(
+    sort: str,
+    age: str,
+    rank: str,
+    is_coach: bool = False,
+    students_list: list[User] | None = None,
+) -> InlineKeyboardMarkup:
+    """Клавиатура фильтров рейтинга (паттерн выбора дорожек: активный
+    параметр помечается ✅). Для тренера снизу прикрепляются кнопки
+    провала в профили учеников (_students_kb)."""
+
+    def mark(active: bool) -> str:
+        return "✅ " if active else ""
+
+    builder = InlineKeyboardBuilder()
+    # Ряд 1 — сортировка
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{mark(sort == 'exp')}🔥 По EXP",
+            callback_data=f"rating:{'score' if sort == 'exp' else 'exp'}:{age}:{rank}",
+        ),
+        InlineKeyboardButton(
+            text=f"{mark(sort == 'score')}🎯 По Очкам",
+            callback_data=f"rating:{'exp' if sort == 'score' else 'score'}:{age}:{rank}",
+        ),
+    )
+    # Ряд 2 — возраст
+    ages = [("all", "Все"), ("kids", "До 7 лет"), ("teens", "8-17"), ("adults", "18+")]
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{mark(age == val)}{label}",
+                callback_data=f"rating:{sort}:{val}:{rank}",
+            )
+            for val, label in ages
+        ]
+    )
+    # Ряд 3 — ранг
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{mark(rank == 'all')}Все ранги",
+            callback_data=f"rating:{sort}:{age}:all",
+        ),
+        InlineKeyboardButton(
+            text=f"{mark(rank == 'novice')}Новички",
+            callback_data=f"rating:{sort}:{age}:novice",
+        ),
+    )
+
+    kb = builder.as_markup()
+
+    # Мульти-интерфейс тренера: кнопки провала в профили учеников
+    if is_coach and students_list:
+        student_kb = _students_kb(students_list)
+        extra_rows = [
+            (b.text, b.callback_data) for row in student_kb.inline_keyboard for b in row
+        ]
+        for text, cd in extra_rows:
+            builder.row(InlineKeyboardButton(text=text, callback_data=cd))
+        kb = builder.as_markup()
+    return kb
+
+
+@router.message(F.text == "📈 Рейтинги")
+async def ratings(message: Message, session: AsyncSession):
+    """Единая точка входа в рейтинги с разделением прав:
+    гость — текстовый ТОП-10 без кнопок; ученик/зритель — фильтры;
+    главный тренер — фильтры + кнопки профилей учеников."""
+    tg_id = message.from_user.id
+    user = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+
+    # Сценарий А: абсолютный гость ИЛИ неодобренный пользователь
+    # (заявка спортсмена/зрителя на рассмотрении) — только ТОП-10 текстом
+    if user is None or not user.is_approved:
+        text = await build_rating_text(session, "exp", "all", "all", limit=10)
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    # Сценарий В: главный тренер (по ТЕКУЩЕЙ роли в базе — в режиме
+    # тестирования ученика он видит рейтинги как обычный пользователь)
+    if user.role == "coach" and tg_id == CHIEF_COACH_ID:
+        students = (
+            (
+                await session.execute(
+                    select(User)
+                    .where(
+                        User.role == "student", User.is_approved == True
+                    )  # noqa: E712
+                    .order_by(User.level.desc(), User.xp.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        text = await build_rating_text(session, "exp", "all", "all")
+        await message.answer(
+            text,
+            reply_markup=build_rating_keyboard(
+                "exp", "all", "all", is_coach=True, students_list=students
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    # Сценарий Б: ученик или зритель — фильтры без кнопок профилей
+    text = await build_rating_text(session, "exp", "all", "all")
+    await message.answer(
+        text,
+        reply_markup=build_rating_keyboard("exp", "all", "all", is_coach=False),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("rating:"))
+async def rating_filters(callback: CallbackQuery, session: AsyncSession):
+    """Смена фильтров рейтинга «на лету» через edit_text."""
+    try:
+        _, sort, age, rank = callback.data.split(":")
+    except ValueError:
+        await callback.answer("Некорректный фильтр", show_alert=True)
+        return
+
+    tg_id = callback.from_user.id
+    user = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+    is_coach = user is not None and user.role == "coach" and tg_id == CHIEF_COACH_ID
+    # Неодобренный пользователь не должен уметь раскрывать полный рейтинг фильтрами
+    if user is not None and not user.is_approved and not is_coach:
+        text = await build_rating_text(session, sort, age, rank, limit=10)
+        await callback.message.edit_text(
+            text + "\n\n🔒 Полный рейтинг откроется после подтверждения тренером.",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    students_list = None
+    if is_coach:
+        students_list = (
+            (
+                await session.execute(
+                    select(User)
+                    .where(
+                        User.role == "student", User.is_approved == True
+                    )  # noqa: E712
+                    .order_by(User.level.desc(), User.xp.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    text = await build_rating_text(session, sort, age, rank)
+    new_kb = build_rating_keyboard(
+        sort, age, rank, is_coach=is_coach, students_list=students_list
+    )
+    await callback.message.edit_text(text, reply_markup=new_kb, parse_mode="HTML")
+    await callback.answer()
 
 
 @router.message(F.text == "📊 Статистика")
@@ -144,7 +407,32 @@ async def coach_stats(message: Message, session: AsyncSession):
 
     await message.answer(
         "\n".join(lines),
-        reply_markup=_students_kb(students),
+        reply_markup=_stats_keyboard(students),
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == "🏆 Рейтинг")
+async def coach_rating_entry(message: Message, session: AsyncSession):
+    """Reply-кнопка '🏆 Рейтинг': тот же рейтинг, что у учеников (сценарий Б),
+    но для главного тренера — с кнопками провала в профили учеников."""
+    students = (
+        (
+            await session.execute(
+                select(User)
+                .where(User.role == "student", User.is_approved == True)  # noqa: E712
+                .order_by(User.level.desc(), User.xp.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    text = await build_rating_text(session, "exp", "all", "all")
+    await message.answer(
+        text,
+        reply_markup=build_rating_keyboard(
+            "exp", "all", "all", is_coach=True, students_list=students
+        ),
         parse_mode="HTML",
     )
 
@@ -790,10 +1078,19 @@ async def profile_process_birthdate(
     user.birth_date = born
     await session.commit()
     await state.clear()
-    await message.answer(
-        "✅ Дата рождения сохранена!",
-        reply_markup=get_student_main_menu(),
-    )
+    # Зрителю не меняли меню на студенческое: возвращаем его собственное
+    if user.role == "viewer":
+        from keyboards.common_kb import get_guest_menu
+
+        await message.answer(
+            "✅ Дата рождения сохранена!",
+            reply_markup=get_guest_menu(is_viewer=True),
+        )
+    else:
+        await message.answer(
+            "✅ Дата рождения сохранена!",
+            reply_markup=get_student_main_menu(),
+        )
 
     # Показываем обновленный профиль (с фото / каптионом / текстом)
     await send_profile_message(message.bot, message.chat.id, user, session)

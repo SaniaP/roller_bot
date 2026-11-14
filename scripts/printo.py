@@ -117,6 +117,8 @@ async def main():
         await print_any_table(table_name, filter_column=filter_column, filter_value=filter_value)
 
 
+
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())

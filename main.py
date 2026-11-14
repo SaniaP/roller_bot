@@ -40,10 +40,18 @@ async def main():
         # Легкая миграция: SQLite не достраивает колонки существующих таблиц через create_all,
         # поэтому новые колонки моделей (например, trick_logs.needs_review) добавляем вручную
         import sqlite3
-        from models import TrickLog
+        from models import TrickLog, User
 
         db_path = str(engine.url).split("///")[-1]  # sqlite+aiosqlite:///roller_school.db -> roller_school.db
         sync_conn = sqlite3.connect(db_path)
+        # Новые колонки зрителя (viewer_for_id, relation) в users
+        user_cols = {row[1] for row in sync_conn.execute("PRAGMA table_info(users)")}
+        if user_cols:
+            for col in {c.name for c in User.__table__.columns} - user_cols:
+                sync_conn.execute(
+                    f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT NULL"
+                )
+                print(f"   ➕ Добавлена колонка users.{col}")
         existing_cols = {row[1] for row in sync_conn.execute("PRAGMA table_info(trick_logs)")}
         if existing_cols:
             model_cols = {c.name for c in TrickLog.__table__.columns}
