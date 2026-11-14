@@ -199,19 +199,6 @@ async def guest_pick_viewer(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data == CALLBACK_REG_ROLE_VIEWER)
-async def guest_pick_viewer(callback: CallbackQuery, state: FSMContext):
-    """Гость выбрал [Зритель] — запрашиваем, за кем он наблюдает."""
-    await state.set_state(StudentStates.waiting_for_viewer_target)
-    await callback.message.edit_text(
-        "👀 <b>Регистрация зрителя</b>\n\n"
-        "Укажите спортсмена, за кем вы наблюдаете — напишите его "
-        "<b>Фамилию и Имя</b> (как записан у тренера).\n\n"
-        "После подтверждения тренером вам откроется полный рейтинг."
-    )
-    await callback.answer()
-
-
 @router.message(StudentStates.waiting_for_viewer_target, F.text == "❌ Отмена")
 async def viewer_reg_cancel(message: Message, state: FSMContext):
     """Отмена регистрации зрителя."""
@@ -472,9 +459,7 @@ async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
             text=(
                 (
                     f"🎉 Отличные новости, <b>{escape(user.full_name or '')}</b>!\n"
-                    "Тренер подтвердил вас как зрителя! Теперь вам доступен "
-                    "полный рейтинг — через кнопку «📈 Рейтинги»."
-                    "и функция «👤 Наблюдать за персонажем»."
+                    "Тренер подтвердил вас как зрителя! Теперь вам доступно полное меню бота."
                 )
                 if is_viewer
                 else (
