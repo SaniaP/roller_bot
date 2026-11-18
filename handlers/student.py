@@ -26,7 +26,7 @@ from handlers.coach.stats import (
 )
 
 # как мы считаем если их не используем?)
-from calculator import (
+from calculator import (  # noqa: F401 — используется в хендлерах ниже и внешними импортами
     calculate_single_trick,
     calculate_current_workout_totals,
     check_level_up,
@@ -120,7 +120,6 @@ async def student_process_pin(
     )
     existing_reg = (await session.execute(reg_check)).scalar_one_or_none()
 
-    registered_now = False
     if not existing_reg:
         # Создаем запись в workout_registrations
         registration = WorkoutRegistration(
@@ -131,7 +130,6 @@ async def student_process_pin(
         )
         session.add(registration)
         await session.commit()
-        registered_now = True
 
         # Уведомляем тренера и обновляем ему список спортсменов на занятии:
         # без этого самостоятельные подключения по PIN не появляются
@@ -372,8 +370,16 @@ async def student_today_stats(
             trick = tricks.get(log.trick_id)
             name = trick.name if trick else "Трюк"
             status = "✅ подтвержден" if not log.needs_review else "⏳ на проверке"
+            # Поправка качества, внесенная тренером при подтверждении
+            mult = log.execution_multiplier or 1.0
+            if mult < 1.0:
+                accuracy = f" • (-{(1.0 - mult) * 100:.0f}%)"
+            elif mult > 1.0:
+                accuracy = f" • кач. {mult:.2f}"
+            else:
+                accuracy = ""
             lines.append(
-                f"🎯 {name}: {log.quantity} конусов, (дорожка {log.cone_line}) — "
+                f"🎯 {name}: {log.quantity} конусов, (дорожка {log.cone_line}){accuracy} — "
                 f"{log.calculated_points} очков, +{log.calculated_xp} EXP — {status}"
             )
 
@@ -433,11 +439,12 @@ async def student_today_stats(
         live_score = round(base_points - penalty, 2)
 
         xp_results.sort(reverse=True)
-        live_xp = sum(xp_results[:5])
+        live_xp = sum(xp_results[: (level_reqs.max_workout_logs if level_reqs else 10)])
 
         max_logs = level_reqs.max_workout_logs if level_reqs else 10
         min_categories = level_reqs.min_trick_categories if level_reqs else 3
-        categories_count = len({t.category for t in tricks.values() if t})
+        if not level_reqs:
+            categories_count = len({t.category for t in tricks.values() if t})
 
         def _chk(done, total):
             return "✅" if done >= total else "⚠️"

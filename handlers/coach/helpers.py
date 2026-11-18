@@ -16,7 +16,6 @@ from keyboards.coach_kb import (
     get_active_workout_kb,
     WorkoutAction,
 )
-from calculator import calculate_current_workout_totals
 
 
 async def get_active_workout(session: AsyncSession) -> Workout | None:
@@ -233,7 +232,8 @@ async def show_skater_card_or_main_list(
             )
 
     # --- Живая шапка: база = сумма лучших 8 / 8, штраф = 3.0 за недостающую категорию,
-    # опыт = сумма лучших 5 трюков/связок по EXP (каждый шаг связки идет в топ-8 очков)
+    # опыт = топ-N трюков/связок по EXP (N = max_workout_logs из LevelExperience),
+    # каждый шаг связки идет в топ-8 очков
     sport_results: list[float] = []
     xp_results: list[int] = []
     for log, _t in pairs:
@@ -259,7 +259,9 @@ async def show_skater_card_or_main_list(
     live_score = round(base_points - penalty, 2)
 
     xp_results.sort(reverse=True)
-    live_xp = sum(xp_results[:5])
+    live_xp = sum(
+        xp_results[: (level_reqs.max_workout_logs if level_reqs else 10)]
+    )
 
     max_logs = level_reqs.max_workout_logs if level_reqs else 10
     min_categories = level_reqs.min_trick_categories if level_reqs else 3

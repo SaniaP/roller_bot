@@ -538,6 +538,11 @@ def build_workout_log_text(
             last = steps[-1]
             combo_points = last.calculated_points + (last.combo_bonus or 0.0)
             combo_xp = (combo_exp or {}).get(cid) or sum(s.calculated_xp for s in steps)
+            # Как в калькуляторе: КАЖДЫЙ шаг связки independently участвует
+            # в топ-8 по очкам, плюс итог связки отдельной записью;
+            # в опыте шаги не участвуют лично — только агрегат связки.
+            for s in steps:
+                sport_results.append(s.calculated_points)
             sport_results.append(combo_points)
             xp_results.append(combo_xp)
 
@@ -551,7 +556,7 @@ def build_workout_log_text(
         live_score = round(base_points - live_penalty, 2)
 
         xp_results.sort(reverse=True)
-        live_xp = sum(xp_results[:5])
+        live_xp = sum(xp_results[: (level_reqs.max_workout_logs if level_reqs else 10)])
 
         pts_line = f"🏅 {live_score:.2f}"
         if live_penalty:
