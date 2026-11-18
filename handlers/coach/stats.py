@@ -437,41 +437,6 @@ async def coach_rating_entry(message: Message, session: AsyncSession):
     )
 
 
-async def _workout_caused_level_up(
-    session: AsyncSession, student: User, workout_id: int, training_xp: int
-) -> bool:
-    """Проверяет по логам: boosted ли уровень этой тренировкой.
-    Уровень растёт, когда накопленный EXP (без этой тренировки) был ниже порога,
-    а с этой тренировкой — достиг"""
-    # EXP всех ДРУГИХ закрытых тренировок ученика
-    other_regs = (
-        (
-            await session.execute(
-                select(WorkoutRegistration.training_xp)
-                .join(Workout, Workout.id == WorkoutRegistration.workout_id)
-                .where(
-                    WorkoutRegistration.student_id == student.id,
-                    WorkoutRegistration.workout_id != workout_id,
-                    Workout.status == STATUS_CLOSED,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    xp_before = sum(other_regs)
-    xp_after = xp_before + training_xp
-
-    next_reqs = await session.get(LevelExperience, student.level)
-    if not next_reqs:
-        return False
-
-    threshold = next_reqs.required_xp
-    # Ученик сейчас на уровне L: значит порог достижения уровня L был превышен.
-    # Тренировка вызвала lvl up, если xp_before < threshold <= xp_after
-    return xp_before < threshold <= xp_after
-
-
 async def _best_training_points(session: AsyncSession, student_id: int) -> float | None:
     """Лучший (максимальный) результат training_points спортсмена по всем тренировкам"""
     return await session.scalar(
@@ -554,10 +519,49 @@ def build_workout_log_text(
 
     # --- Строка очков: «база − штраф» показывается только при штрафе по очкам
     points_penalty = penalty_info.get("points_penalty", 0.0) if penalty_info else 0.0
-    pts_line = f"🏅 {reg.training_points:.2f} очк."
-    if points_penalty:
-        pts_line += f" (база {reg.training_points + points_penalty:.2f} − штраф {points_penalty:.1f})"
-    parts.append(f"{pts_line} | ✨ +{reg.training_xp} EXP")
+    if workout.status == STATUS_ACTIVE:
+        # Активная тренировка: живой пересчет по формулам калькулятора.
+        # База = сумма лучших 8 очков / 8 (недостающие слоты дают 0),
+        # штраф = 3.0 за каждую недостающую категорию,
+        # опыт = сумма лучших 5 трюков/связок по EXP.
+        sport_results: list[float] = []
+        xp_results: list[int] = []
+        combo_steps: dict[str, list[TrickLog]] = {}
+        for log, _t in logs:
+            if log.combo_id:
+                combo_steps.setdefault(log.combo_id, []).append(log)
+            else:
+                sport_results.append(log.calculated_points)
+                xp_results.append(log.calculated_xp)
+        for cid, steps in combo_steps.items():
+            steps.sort(key=lambda l: l.combo_step or 0)
+            last = steps[-1]
+            combo_points = last.calculated_points + (last.combo_bonus or 0.0)
+            combo_xp = (combo_exp or {}).get(cid) or sum(s.calculated_xp for s in steps)
+            sport_results.append(combo_points)
+            xp_results.append(combo_xp)
+
+        sport_results.sort(reverse=True)
+        base_points = sum(sport_results[:8]) / 8.0
+        live_penalty = 0.0
+        categories_count = len({t.category for _l, t in logs})
+        if level_reqs:
+            missing = max(0, level_reqs.min_trick_categories - categories_count)
+            live_penalty = missing * 3.0
+        live_score = round(base_points - live_penalty, 2)
+
+        xp_results.sort(reverse=True)
+        live_xp = sum(xp_results[:5])
+
+        pts_line = f"🏅 {live_score:.2f}"
+        if live_penalty:
+            pts_line += f" (- штраф {live_penalty:.1f})"
+        parts.append(f"{pts_line} | ✨ +{live_xp} EXP")
+    else:
+        pts_line = f"🏅 {reg.training_points:.2f} очк."
+        if points_penalty:
+            pts_line += f" (база {reg.training_points + points_penalty:.2f} − штраф {points_penalty:.1f})"
+        parts.append(f"{pts_line} | ✨ +{reg.training_xp} EXP")
 
     # --- Строка зачета: слоты опыта, слоты очков, категории
     max_logs = level_reqs.max_workout_logs if level_reqs else 10
@@ -771,15 +775,9 @@ def _workout_breakdown(
     penalty_info: dict | None = None
     if pairs:
         categories_count = len({trick.category for _log, trick in pairs})
-        missing_tricks = max(0, 8 - len(results))
         missing_categories = max(0, min_categories - categories_count)
-        points_penalty = (missing_tricks + missing_categories) * 3.0
+        points_penalty = missing_categories * 3.0
 
-        if missing_tricks:
-            penalties.append(
-                f"Недобор трюков: -{points_penalty if not missing_categories else missing_tricks * 3.0:.1f} очк. "
-                f"(не хватило {missing_tricks} до минимума 8)"
-            )
         if missing_categories:
             cat_points = missing_categories * 3.0
             penalties.append(
@@ -795,7 +793,6 @@ def _workout_breakdown(
 
         penalty_info = {
             "points_penalty": points_penalty,
-            "missing_tricks": missing_tricks,
             "missing_categories": missing_categories,
             "categories_count": categories_count,
             "xp_used": 0,
@@ -859,16 +856,10 @@ async def build_student_profile_text(student: User, session: AsyncSession) -> st
 
     for reg, workout in regs:
         date_str = workout.date.strftime("%d.%m.%Y") if workout.date else "—"
-        lvl_up_note = ""
-        # Если после этой тренировки у ученика вырос уровень — фиксируем это в разбивке
-        if workout.status == STATUS_CLOSED and reg.training_xp:
-            lvl_up_note = (
-                " 🔥"
-                if await _workout_caused_level_up(
-                    session, student, workout.id, reg.training_xp
-                )
-                else ""
-            )
+        # 🔥 ставится по флагу, зафиксированному при закрытии тренировки
+        lvl_up_note = (
+            " 🔥" if workout.status == STATUS_CLOSED and reg.caused_level_up else ""
+        )
         parts.append(
             f" • {date_str} (№{workout.id}, {workout.status}) — "
             f"🏅 {reg.training_points:.1f} очк., +{reg.training_xp} EXP{lvl_up_note}"
@@ -1004,14 +995,8 @@ async def stats_workout_details(
     combo_exp = await _combo_exp_map(logs, student, session)
     text = build_workout_log_text(workout, reg, student, logs, level_reqs, combo_exp)
 
-    # Добавляем пометку о повышении уровня, если оно было на этой тренировке
-    if (
-        workout.status == STATUS_CLOSED
-        and reg.training_xp
-        and await _workout_caused_level_up(
-            session, student, workout.id, reg.training_xp
-        )
-    ):
+    # 🔥 — по флагу, зафиксированному при закрытии тренировки
+    if workout.status == STATUS_CLOSED and reg.caused_level_up:
         text = fit_telegram_text(text + "\n🔥 Уровень повышен на этой тренировке!")
 
     builder = InlineKeyboardBuilder()

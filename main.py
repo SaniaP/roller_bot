@@ -40,7 +40,7 @@ async def main():
         # Легкая миграция: SQLite не достраивает колонки существующих таблиц через create_all,
         # поэтому новые колонки моделей (например, trick_logs.needs_review) добавляем вручную
         import sqlite3
-        from models import TrickLog, User
+        from models import TrickLog, User, WorkoutRegistration
 
         db_path = str(engine.url).split("///")[-1]  # sqlite+aiosqlite:///roller_school.db -> roller_school.db
         sync_conn = sqlite3.connect(db_path)
@@ -59,6 +59,14 @@ async def main():
                 col_type = "INTEGER" if col == "needs_review" else "REAL"
                 sync_conn.execute(f"ALTER TABLE trick_logs ADD COLUMN {col} {col_type} DEFAULT 0")
                 print(f"   ➕ Добавлена колонка trick_logs.{col}")
+        # Новая колонка caused_level_up в workout_registrations (флаг lvl up этой тренировкой)
+        reg_cols = {row[1] for row in sync_conn.execute("PRAGMA table_info(workout_registrations)")}
+        if reg_cols:
+            for col in {c.name for c in WorkoutRegistration.__table__.columns} - reg_cols:
+                sync_conn.execute(
+                    f"ALTER TABLE workout_registrations ADD COLUMN {col} INTEGER DEFAULT 0"
+                )
+                print(f"   ➕ Добавлена колонка workout_registrations.{col}")
         sync_conn.commit()
         sync_conn.close()
     print("✅ Структура базы данных успешно синхронизирована!")

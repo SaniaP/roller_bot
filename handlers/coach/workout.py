@@ -247,6 +247,8 @@ async def process_finish_workout(
 
         if level_upgraded:
             student.level = new_level
+            # Фиксируем на регистрации: именно эта тренировка подняла уровень
+            reg.caused_level_up = True
             lvl_up_text = f" 🔥 LEVEL UP! Новый уровень: {new_level}!"
 
         summary_report += (

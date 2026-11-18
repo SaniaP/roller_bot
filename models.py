@@ -161,6 +161,8 @@ class WorkoutRegistration(Base):
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     training_points: Mapped[float] = mapped_column(Float, default=0.0)
     training_xp: Mapped[int] = mapped_column(Integer, default=0)
+    # Флаг: именно эта тренировка подняла ученику уровень (ставится при закрытии)
+    caused_level_up: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class TrickLog(Base):

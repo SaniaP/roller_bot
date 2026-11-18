@@ -70,7 +70,9 @@ def percentage_to_multiplier(pct: int) -> float:
     return max(0.0, 1.0 + pct / 100.0)
 
 
-def level_progress_percent(current_xp: int, prev_required_xp: int, next_required_xp: int) -> float:
+def level_progress_percent(
+    current_xp: int, prev_required_xp: int, next_required_xp: int
+) -> float:
     """Процент прогресса до следующего уровня.
 
     required_xp в level_experience — СУММАРНЫЙ опыт, нужный для достижения уровня.
@@ -166,7 +168,7 @@ async def show_skater_card_or_main_list(
 
     student = await session.get(User, student_id)
 
-    # Тянем все логи трюков этого ученика за текущую сессию
+    # Тянем все логи трюков этого ученика за текущую сессию (+ трюки для названий)
     logs = (
         (
             await session.execute(
@@ -179,19 +181,105 @@ async def show_skater_card_or_main_list(
         .all()
     )
 
-    # Калькуляция результатов «на лету»
-    current_sport_score, current_xp_gain = await calculate_current_workout_totals(
-        list(logs), student, session
+    tricks = {
+        t.id: t
+        for t in (
+            await session.scalars(
+                select(Trick).where(Trick.id.in_([l.trick_id for l in logs] or [0]))
+            )
+        ).all()
+    }
+
+    # --- Шапка: имя + ранг (без «текущий опыт»)
+    lines = [
+        f"👤 <b>{student.full_name}</b>",
+        f"🎮 <b>Ранг:</b> {student.title} (Уровень: {student.level})",
+    ]
+
+    # --- Связки блоками, затем одиночные трюки (как в журнале тренировки)
+    from handlers.coach.stats import _combo_exp_map
+    from models import LevelExperience
+
+    pairs = [(log, tricks.get(log.trick_id)) for log in logs]
+    combo_exp = await _combo_exp_map(pairs, student, session)
+
+    combos: dict[str, list[tuple]] = {}
+    singles: list[tuple] = []
+    for log, trick in pairs:
+        if log.combo_id:
+            combos.setdefault(log.combo_id, []).append((log, trick))
+        else:
+            singles.append((log, trick))
+
+    if combos:
+        lines.append("")
+        for cid, steps in combos.items():
+            steps.sort(key=lambda p: p[0].combo_step or 0)
+            names = " → ".join(t.name if t else "?" for _log, t in steps)
+            last_log = steps[-1][0]
+            combo_points = last_log.calculated_points + (last_log.combo_bonus or 0.0)
+            combo_xp = combo_exp.get(cid, 0)
+            lines.append(
+                f"🧩 Связка: {names} — {combo_points:.1f} очков, +{combo_xp} EXP"
+            )
+
+    if singles:
+        lines.append("")
+        for log, trick in singles:
+            name = trick.name if trick else "Трюк"
+            lines.append(f"• {name} 🏅✨")
+            lines.append(
+                f"{log.quantity} кон. ({log.cone_line}) — {log.calculated_points:.1f} очк. | +{log.calculated_xp} EXP"
+            )
+
+    # --- Живая шапка: база = сумма лучших 8 / 8, штраф = 3.0 за недостающую категорию,
+    # опыт = сумма лучших 5 трюков/связок по EXP (каждый шаг связки идет в топ-8 очков)
+    sport_results: list[float] = []
+    xp_results: list[int] = []
+    for log, _t in pairs:
+        if not log.combo_id:
+            sport_results.append(log.calculated_points)
+            xp_results.append(log.calculated_xp)
+    for cid, steps in combos.items():
+        for s_log, _t in steps:
+            sport_results.append(s_log.calculated_points)
+        last_log = steps[-1][0]
+        sport_results.append(last_log.calculated_points + (last_log.combo_bonus or 0.0))
+        xp_results.append(combo_exp.get(cid, 0))
+
+    level_reqs = await session.get(LevelExperience, student.level)
+    categories_count = len({t.category for t in tricks.values() if t})
+
+    sport_results.sort(reverse=True)
+    base_points = sum(sport_results[:8]) / 8.0
+    penalty = 0.0
+    if level_reqs:
+        missing = max(0, level_reqs.min_trick_categories - categories_count)
+        penalty = missing * 3.0
+    live_score = round(base_points - penalty, 2)
+
+    xp_results.sort(reverse=True)
+    live_xp = sum(xp_results[:5])
+
+    max_logs = level_reqs.max_workout_logs if level_reqs else 10
+    min_categories = level_reqs.min_trick_categories if level_reqs else 3
+
+    def _chk(done, total):
+        return "✅" if done >= total else "⚠️"
+
+    lines.append("")
+    lines.append("Предварительно:")
+    pts_line = f"🏅 {live_score:.2f}"
+    if penalty:
+        pts_line += f" (- штраф {penalty:.1f})"
+    lines.append(
+        f"{pts_line} | ✨ +{live_xp} EXP\n"
+        f"Зачет: ✨ {min(len(xp_results), max_logs)}/{max_logs} {_chk(len(xp_results), max_logs)} • "
+        f"🏅 {min(len(sport_results), 8)}/8 {_chk(len(sport_results), 8)} • "
+        f"Кат: {categories_count}/{min_categories} {_chk(categories_count, min_categories)}"
     )
 
-    card_text = (
-        f"👤 **Спортсмен:** {student.full_name}\n"
-        f"🎮 **Ранг:** {student.title} (Уровень: {student.level})\n"
-        f"✨ **Текущий опыт:** {student.xp} EXP\n\n"
-        f"📊 **Предварительные итоги сессии:**\n"
-        f" — Средний спортивный балл: <b>{current_sport_score}</b>\n"
-        f" — Набрано опыта за сегодня: <b>+{current_xp_gain} EXP</b>"
-    )
+    card_text = "\n".join(lines)
 
     try:
         await callback.message.edit_text(

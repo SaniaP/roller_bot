@@ -576,18 +576,20 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
     else:
         user.role = "coach"
 
-        # Если тренер «застрял» в роли ученика с активной тренировкой —
-        # убираем его регистрацию из активной тренировки, чтобы не блокировать старт новой
-        if active_reg_id := await session.scalar(
-            select(WorkoutRegistration.id).where(
-                WorkoutRegistration.student_id == user.id,
-                Workout.status == STATUS_ACTIVE,
-            )
-        ):
-            reg = await session.get(WorkoutRegistration, active_reg_id)
-            if reg:
-                await session.delete(reg)
+        # Регистрацию в активной тренировке СОХРАНЯЕМ: если тестовый ученик
+        # подключился по PIN и сдал трюки, он должен остаться в списке
+        # участников и участвовать в финализации. Удаляем только FSM-состояние
+        # ученика, чтобы не блокировать тренерские сценарии.
         await session.commit()
+
+        # Сбрасываем FSM-состояние ученика (активная тренировка), если оно было
+        bot_id = message.bot.id
+        stub = FSMContext(
+            storage=state.storage,
+            key=StorageKey(bot_id=bot_id, chat_id=tg_id, user_id=tg_id),
+        )
+        await stub.set_state(None)
+        await stub.set_data({})
 
         # Проверяем активную тренировку для правильного отображения меню тренера
         active_w = (

@@ -120,6 +120,7 @@ async def student_process_pin(
     )
     existing_reg = (await session.execute(reg_check)).scalar_one_or_none()
 
+    registered_now = False
     if not existing_reg:
         # Создаем запись в workout_registrations
         registration = WorkoutRegistration(
@@ -130,6 +131,35 @@ async def student_process_pin(
         )
         session.add(registration)
         await session.commit()
+        registered_now = True
+
+        # Уведомляем тренера и обновляем ему список спортсменов на занятии:
+        # без этого самостоятельные подключения по PIN не появляются
+        # в уже отправленном сообщении «ИДЕТ ТРЕНИРОВКА».
+        from handlers.coach.helpers import get_workout_students
+        from keyboards.coach_kb import get_active_workout_kb
+
+        coach = (
+            await session.execute(select(User).where(User.role == "coach").limit(1))
+        ).scalar_one_or_none()
+        if coach and coach.telegram_id:
+            current_students = await get_workout_students(session, active_workout.id)
+            try:
+                await message.bot.send_message(
+                    chat_id=coach.telegram_id,
+                    text=(
+                        f"🛼 <b>{user.full_name}</b> подключился к тренировке "
+                        "по PIN-коду!\n\nСписок спортсменов на занятии:"
+                    ),
+                    reply_markup=get_active_workout_kb(
+                        active_workout.id, current_students
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Не удалось уведомить тренера о подключении ученика: {e}"
+                )
 
     # Сохраняем ID тренировки в контекст FSM ученика
     await state.update_data(current_workout_id=active_workout.id)
@@ -349,22 +379,81 @@ async def student_today_stats(
 
     # Итог по подтвержденным: как в журнале тренировок (калькулятор итогов)
     from calculator import calculate_current_workout_totals
+    from models import LevelExperience
 
     student = await session.get(User, user.id)
+    level_reqs = await session.get(LevelExperience, student.level)
     sport_score, total_xp = await calculate_current_workout_totals(
         list(logs), student, session
     )
     pending = [l for l in logs if l.needs_review]
+    # Шапка как в журнале тренировок: только для активной тренировки,
+    # для завершенной — прежний формат
+    from models import STATUS_ACTIVE as _SA
+
     if pending:
         lines.append(
-            f"\n⏳ На проверке: {len(pending)} — очки засчитаются после подтверждения тренером.\n"
-            f"📊 Текущий результат (предварительно): {sport_score} очков, +{total_xp} EXP"
+            f"\n⏳ На проверке: {len(pending)} — очки засчитаются после подтверждения тренером."
         )
     else:
+        lines.append("\n✅ Все отправленные трюки подтверждены тренером.")
+
+    if active_workout.status == _SA:
+        # Живая шапка: база = сумма лучших 8 / 8, штраф = 3.0 за недостающую категорию,
+        # опыт = сумма лучших 5 трюков/связок по EXP
+        sport_results: list[float] = []
+        xp_results: list[int] = []
+        combo_steps: dict[str, list] = {}
+        for log in logs:
+            if log.combo_id:
+                combo_steps.setdefault(log.combo_id, []).append(log)
+            else:
+                sport_results.append(log.calculated_points)
+                xp_results.append(log.calculated_xp)
+        for cid, steps in combo_steps.items():
+            steps.sort(key=lambda l: l.combo_step or 0)
+            last = steps[-1]
+            combo_points = last.calculated_points + (last.combo_bonus or 0.0)
+            combo_xp = combo_exp.get(cid, 0)
+            # Как в журнале/калькуляторе: КАЖДЫЙ шаг связки independently
+            # участвует в топ-8 по очкам, плюс итог связки как отдельная запись;
+            # в опыте шаги не участвуют лично — только агрегат связки.
+            for s in steps:
+                sport_results.append(s.calculated_points)
+            sport_results.append(combo_points)
+            xp_results.append(combo_xp)
+
+        sport_results.sort(reverse=True)
+        base_points = sum(sport_results[:8]) / 8.0
+        penalty = 0.0
+        if level_reqs:
+            categories_count = len({t.category for t in tricks.values() if t})
+            missing = max(0, level_reqs.min_trick_categories - categories_count)
+            penalty = missing * 3.0
+        live_score = round(base_points - penalty, 2)
+
+        xp_results.sort(reverse=True)
+        live_xp = sum(xp_results[:5])
+
+        max_logs = level_reqs.max_workout_logs if level_reqs else 10
+        min_categories = level_reqs.min_trick_categories if level_reqs else 3
+        categories_count = len({t.category for t in tricks.values() if t})
+
+        def _chk(done, total):
+            return "✅" if done >= total else "⚠️"
+
+        lines.append("📊 Предварительно:")
+        pts_line = f"🏅 {live_score:.2f}"
+        if penalty:
+            pts_line += f" (- штраф {penalty:.1f})"
         lines.append(
-            f"\n✅ Все отправленные трюки подтверждены тренером.\n"
-            f"📊 Итог тренировки: {sport_score} очков, +{total_xp} EXP"
+            f"{pts_line} | ✨ +{live_xp} EXP\n"
+            f"Зачет: ✨ {min(len(xp_results), max_logs)}/{max_logs} {_chk(len(xp_results), max_logs)} • "
+            f"🏅 {min(len(sport_results), 8)}/8 {_chk(len(sport_results), 8)} • "
+            f"Категории: {categories_count}/{min_categories} {_chk(categories_count, min_categories)}"
         )
+    else:
+        lines.append(f"📊 Итог тренировки: {sport_score} очков, +{total_xp} EXP")
 
     await message.answer(
         "\n".join(lines),

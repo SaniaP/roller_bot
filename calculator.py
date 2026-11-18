@@ -203,12 +203,9 @@ async def calculate_current_workout_totals(
 
     if tricks_count > 0:
         sum_points = sum(points for points, _ in top_8)
-        avg_points = sum_points / tricks_count
 
-        # Штраф 1: За нехватку трюков до 8 (по -3 балла за каждый отсутствующий)
-        if tricks_count < 8:
-            missing_tricks = 8 - tricks_count
-            avg_points -= missing_tricks * 3.0
+        # База: сумма лучших 8 всегда делится на 8 (недостающие слоты дают 0)
+        avg_points = sum_points / 8.0
 
         # Штраф 2: За нехватку разнообразия категорий (-3 балла за каждую недостающую категорию)
         if categories_count < min_categories:

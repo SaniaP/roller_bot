@@ -1,6 +1,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 """Скрипт для выполнения конкретных изменений в БД.
 Значения можно менять в секции CONFIG ниже.
@@ -13,6 +14,8 @@ from database import async_session
 # КОНФИГУРАЦИЯ: измените значения здесь
 # подставить None если не хотим делать изменение, пример: "delete_user_id": None
 # ============================================
+
+
 
 CONFIG = {
     # 1. Удалить пользователя по ID
@@ -33,6 +36,11 @@ CONFIG = {
     # 5. Удалить тренировку целиком: сначала её логи и регистрации, потом саму запись
     # (Таблицы workout_participants больше нет — участники хранятся в workout_registrations.)
     "delete_workout_id": None,
+
+    # 6. перенос студента из "корманных" в самостоятельных:
+    "update_user_status_id":None, #38 Маргарита Кирко
+    "update_user_telegram_id":None
+
 }
 
 
@@ -92,6 +100,26 @@ async def apply_changes():
                 text("DELETE FROM workouts WHERE id = :wid"), {"wid": wid}
             )
             print(f"Удалена тренировка workout с id={wid}")
+
+
+    # 6. перенос студента из "корманных" в самостоятельных:
+    #"update_user_status_id":None, #38 Маргарита Кирко
+    #"update_user_telegram_id":None #8902031806
+
+
+
+                # 6. добавление user_id студенту
+        if CONFIG["update_user_status_id"]:
+            uid = CONFIG["update_user_status_id"]
+            t_id = CONFIG["update_user_telegram_id"]
+      #      lvl = CONFIG["update_level_value"]
+
+            await session.execute(
+                text("UPDATE users SET telegram_id = :t_id WHERE id = :uid"),
+                {"t_id": t_id, "uid": uid},
+            )
+            print(f"Пользователь id={uid}: Присвоен telegram_id: {t_id}")
+
 
         await session.execute(text("PRAGMA foreign_keys = ON"))
         await session.commit()
