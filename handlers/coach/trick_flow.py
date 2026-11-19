@@ -23,7 +23,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import User, Trick, TrickLog
+from models import User, Trick, TrickLog, Workout, STATUS_ACTIVE
 from keyboards.coach_kb import (
     TrickAction,
     WorkoutAction,
@@ -407,6 +407,27 @@ async def _save_trick_log(
     student_id = data["student_id"]
     trick_id = data["trick_id"]
     cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+
+    # Страховка: если лог уходит с workout_id=0 (FSM-состояние потерялось,
+    # тренировка закрылась) — привязываем к текущей активной тренировке,
+    # иначе трюк пропадет из зачета. Если активной нет — не сохраняем.
+    if not workout_id:
+        active_w = (
+            await session.execute(
+                select(Workout).where(Workout.status == STATUS_ACTIVE)
+            )
+        ).scalar_one_or_none()
+        if active_w:
+            workout_id = active_w.id
+            await state.update_data(workout_id=workout_id, current_workout_id=workout_id)
+        else:
+            await message.answer(
+                "❌ Активной тренировки нет — трюк записать некуда.\n"
+                "Попросите тренера открыть тренировку и подключитесь по PIN.",
+                reply_markup=get_student_main_menu(),
+            )
+            await state.clear()
+            return
 
     student = await session.get(User, student_id)
     trick = await session.get(Trick, trick_id)

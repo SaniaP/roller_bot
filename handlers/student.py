@@ -199,6 +199,26 @@ async def show_categories_dynamic(
         return
 
     workout_id = data.get("current_workout_id") or 0
+    if not workout_id:
+        # FSM мог быть сброшен (например, тренер закрыл тренировку, а студент
+        # продолжил ввод) — привязываемся к текущей активной тренировке,
+        # иначе логи уйдут с workout_id=0 и пропадут из зачета
+        active_w = (
+            await session.execute(
+                select(Workout).where(Workout.status == STATUS_ACTIVE)
+            )
+        ).scalar_one_or_none()
+        if active_w:
+            workout_id = active_w.id
+            await state.update_data(current_workout_id=workout_id)
+        else:
+            await message.answer(
+                "❌ Активной тренировки нет — тренер её закрыл.\n"
+                "Трюк записать некуда. Попросите тренера открыть новую тренировку.",
+                reply_markup=get_student_main_menu(),
+            )
+            await state.clear()
+            return
     user = (
         await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
