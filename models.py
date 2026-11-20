@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     DateTime,
     Date,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
@@ -23,6 +24,10 @@ class CoachStudent(Base):
     """Таблица связи между Тренерами и Учениками (Многие-ко-многим)"""
 
     __tablename__ = "coach_student"
+
+    __table_args__ = (
+        UniqueConstraint("coach_id", "student_id", name="uq_coach_student"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     coach_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -48,7 +53,7 @@ class User(Base):
     )
     role: Mapped[str] = mapped_column(
         String(20), default="student"
-    )  # 'coach' или 'student'
+    )  # 'coach' или 'student' #а viewers?
     full_name: Mapped[str] = mapped_column(String(100))
     phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     is_approved: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -84,10 +89,46 @@ class User(Base):
         "CoachStudent", foreign_keys="CoachStudent.coach_id", back_populates="coach"
     )
 
+    # Признак автономного спортсмена без тренера (соло-режим)
+    is_solo: Mapped[bool] = mapped_column(Boolean, default=False)
+
     @property  # встроенный дек-р, позволяющий пользоваться .is_coach, не держа в БД роль пользователя
     def is_coach(self) -> bool:
         """Удобная проверка роли без хранения дублирующего флага в базе"""
         return self.role == "coach"
+
+
+class Community(Base):
+    """Сообщество тренеров с общим рейтингом учеников"""
+
+    __tablename__ = "communities"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    coaches: Mapped[list["CommunityCoach"]] = relationship(
+        "CommunityCoach", back_populates="community", cascade="all, delete-orphan"
+    )
+
+
+class CommunityCoach(Base):
+    """Связь тренеров с сообществами (многие-ко-многим)"""
+
+    __tablename__ = "community_coach"
+    __table_args__ = (
+        UniqueConstraint("community_id", "coach_id", name="uq_community_coach"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    community_id: Mapped[int] = mapped_column(
+        ForeignKey("communities.id", ondelete="CASCADE")
+    )
+    coach_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+    community: Mapped["Community"] = relationship("Community", back_populates="coaches")
 
 
 class LevelExperience(Base):
@@ -137,6 +178,12 @@ class Workout(Base):
     __tablename__ = "workouts"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # Владелец тренировки (тренер). NULL — для соло-тренировок
+    coach_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Флаг личной тренировки самостоятельного спортсмена
+    is_solo: Mapped[bool] = mapped_column(Boolean, default=False)
     date: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

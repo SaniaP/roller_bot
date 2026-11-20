@@ -1,5 +1,6 @@
 import logging
 from html import escape
+from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -9,7 +10,7 @@ from aiogram.fsm.storage.base import StorageKey
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from models import STATUS_ACTIVE, User, Workout, WorkoutRegistration
+from models import STATUS_ACTIVE, User, Workout, WorkoutRegistration, CoachStudent
 from config import CHIEF_COACH_ID
 
 # Импортируем клавиатуры
@@ -32,14 +33,47 @@ from keyboards.common_kb import (
     get_guest_menu,
     get_role_choice_kb,
     get_request_registration_kb,
+    get_coach_pick_kb,
     CALLBACK_SEND_REQUEST,
     CALLBACK_REG_ROLE_SKATER,
     CALLBACK_REG_ROLE_VIEWER,
+    CALLBACK_REG_ROLE_SOLO,
     GUEST_REGISTER_BTN,
     VIEWER_WATCH_BTN,
     HANDBOOK_BTN,
     RATINGS_BTN,
 )
+
+
+async def get_coach_for_student(
+    session: AsyncSession, student_id: int
+) -> Optional[User]:
+    """Возвращает тренера ученика через CoachStudent (первого)."""
+    link = (
+        await session.execute(
+            select(CoachStudent).where(CoachStudent.student_id == student_id)
+        )
+    ).scalar_one_or_none()
+    if not link:
+        return None
+    return await session.get(User, link.coach_id)
+
+
+async def notify_coach_about_request(
+    bot, coach: User, text: str, reply_markup, session: AsyncSession
+) -> bool:
+    """Отправляет уведомление тренеру; если у тренера нет telegram_id —
+    отправляет главному тренеру (CHIEF_COACH_ID)."""
+    target = coach.telegram_id or CHIEF_COACH_ID
+    try:
+        await bot.send_message(
+            chat_id=target, text=text, reply_markup=reply_markup, parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление тренеру {target}: {e}")
+        return False
+
 
 logger = logging.getLogger(__name__)
 
@@ -174,16 +208,134 @@ async def guest_register_request(message: Message, session: AsyncSession):
 
 
 @router.callback_query(F.data == CALLBACK_REG_ROLE_SKATER)
-async def guest_pick_skater(callback: CallbackQuery):
-    """Гость выбрал [Спортсмен] — стандартный сценарий заявки тренеру."""
+async def guest_pick_skater(callback: CallbackQuery, session: AsyncSession):
+    """Гость выбрал [Спортсмен] — показываем список тренеров для выбора."""
+    coaches = (
+        (
+            await session.execute(
+                select(User).where(User.role == "coach").order_by(User.full_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not coaches:
+        await callback.answer(
+            "😔 Пока нет ни одного тренера. Попробуйте позже.", show_alert=True
+        )
+        return
     await callback.message.edit_text(
-        "🛼 <b>Хочешь тренироваться с нами?</b>\n\n"
-        "Отправь заявку тренеру — и после одобрения\n"
-        "тебе откроется доступ к тренировкам и персонажу. 🚀",
-        reply_markup=get_request_registration_kb(),
+        "🛼 <b>Выбери своего тренера</b>\n\n"
+        "Заявка уйдет выбранному тренеру на одобрение.",
+        reply_markup=get_coach_pick_kb(coaches),
         parse_mode="HTML",
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == CALLBACK_REG_ROLE_SOLO)
+async def guest_pick_solo(callback: CallbackQuery, session: AsyncSession):
+    """Гость выбрал [Одиночный режим] — сразу создаем одобренного соло-спортсмена."""
+    tg_id = callback.from_user.id
+    existing = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+    if existing:
+        await callback.answer("⏳ Вы уже зарегистрированы в боте.", show_alert=True)
+        return
+
+    new_user = User(
+        telegram_id=tg_id,
+        full_name=callback.from_user.full_name or "Спортсмен",
+        role="student",
+        is_approved=True,  # соло-режим не требует одобрения тренером
+        is_solo=True,
+        level=1,
+    )
+    session.add(new_user)
+    await session.commit()
+
+    await callback.answer("🚀 Добро пожаловать в одиночный режим!")
+    await callback.message.answer(
+        f"🚀 <b>{escape(new_user.full_name or '')}</b>, вы в одиночном режиме!\n\n"
+        "Вы тренируетесь самостоятельно: присоединяйтесь к тренировке по PIN-коду"
+        " и отправляйте трюки на проверку.",
+        reply_markup=get_student_main_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("reg_pick_coach:"))
+async def guest_pick_coach(callback: CallbackQuery, session: AsyncSession):
+    """Гость выбрал тренера — создаем неодобренного студента и шлем заявку
+    именно этому тренеру."""
+    raw = callback.data.split(":")[1]
+    if raw == "cancel":
+        await callback.message.edit_text("🚫 Регистрация отменена.")
+        await callback.answer()
+        return
+
+    coach_id = int(raw)
+    coach = await session.get(User, coach_id)
+    tg_id = callback.from_user.id
+
+    if not coach or coach.role != "coach":
+        await callback.answer("❌ Тренер не найден, выберите другого.", show_alert=True)
+        return
+
+    existing = (
+        await session.execute(select(User).where(User.telegram_id == tg_id))
+    ).scalar_one_or_none()
+    if existing:
+        await callback.answer(
+            "⏳ Ваша заявка уже на рассмотрении у тренера.", show_alert=True
+        )
+        return
+
+    # ПроверкаSolo-переход: пользователь уже есть в базе с is_solo=True
+    solo_transition = bool(existing and existing.is_solo)
+
+    if existing and not existing.is_solo:
+        await callback.answer(
+            "⏳ Ваша заявка уже на рассмотрении у тренера.", show_alert=True
+        )
+        return
+
+    new_user = User(
+        telegram_id=tg_id,
+        full_name=callback.from_user.full_name or "Спортсмен",
+        role="student",
+        is_approved=False,
+        is_solo=False,
+        level=1,
+    )
+    session.add(new_user)
+    await session.commit()
+
+    username = callback.from_user.username
+    safe_name = escape(new_user.full_name or "")
+    safe_username = escape(username) if username else "нет"
+    sent = await notify_coach_about_request(
+        callback.bot,
+        coach,
+        (
+            "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
+            f"Спортсмен: <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
+            f"Username: @{safe_username}\n"
+            f"ID: <code>{tg_id}</code>\n\n"
+            "Разрешить ему доступ к тренировкам?"
+        ),
+        get_approve_user_kb(tg_id, coach_id=coach.id),
+        session,
+    )
+
+    await callback.answer(
+        "📨 Заявка отправлена тренеру!" if sent else "⚠️ Тренер недоступен."
+    )
+    await callback.message.edit_text(
+        "⏳ Ваша заявка отправлена тренеру на одобрение.\n"
+        "Как только тренер подтвердит профиль, вы сможете подключаться к тренировкам!"
+    )
 
 
 @router.callback_query(F.data == CALLBACK_REG_ROLE_VIEWER)
@@ -286,14 +438,34 @@ async def viewer_reg_relation(
     session.add(new_viewer)
     await session.commit()
 
-    # Запрос тренеру на подтверждение зрителя
+    # Заявку зрителя отправляем тренеру выбранного спортсмена
+    if athlete.is_solo:
+        await message.answer(
+            "❌ Этот спортсмен тренируется в одиночном режиме —\n"
+            "наблюдение за ним недоступно. Выберите другого спортсмена."
+        )
+        await session.delete(new_viewer)
+        await session.commit()
+        return
+
+    coach = await get_coach_for_student(session, athlete.id)
+    if not coach:
+        await message.answer(
+            "❌ У этого спортсмена нет тренера, заявку некому одобрить.\n"
+            "Выберите другого спортсмена."
+        )
+        await session.delete(new_viewer)
+        await session.commit()
+        return
+
     try:
         username = message.from_user.username
         safe_viewer = escape(new_viewer.full_name or "")
         safe_athlete = escape(athlete.full_name or "")
         safe_username = escape(username) if username else "нет"
-        await message.bot.send_message(
-            chat_id=CHIEF_COACH_ID,
+        await notify_coach_about_request(
+            bot=message.bot,
+            coach=coach,
             text=(
                 "🔔 <b>Новая заявка: ЗРИТЕЛЬ!</b>\n\n"
                 f"Зритель: <a href='tg://user?id={tg_id}'>{safe_viewer}</a>\n"
@@ -304,8 +476,8 @@ async def viewer_reg_relation(
                 f"Кем приходится: {escape(relation)}\n\n"
                 "Подтвердить доступ к полному рейтингу?"
             ),
-            reply_markup=get_approve_user_kb(tg_id),
-            parse_mode="HTML",
+            reply_markup=get_approve_user_kb(tg_id, coach_id=coach.id),
+            session=session,
         )
     except Exception as e:
         logger.error(f"Не удалось отправить запрос по зрителю тренеру: {e}")
@@ -347,6 +519,44 @@ async def viewer_watch_profile(message: Message, session: AsyncSession):
     await _send_profile(message.bot, message.chat.id, athlete, session)
 
 
+@router.message(F.text == "🔗 Привязаться к тренеру")
+async def solo_link_coach(message: Message, session: AsyncSession):
+    """Соло-спортсмен хочет перейти под крыло тренера — список тренеров."""
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    if not user or not user.is_solo:
+        await message.answer("⛔ Эта кнопка для спортсменов в одиночном режиме.")
+        return
+
+    coaches = (
+        (
+            await session.execute(
+                select(User).where(User.role == "coach").order_by(User.full_name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not coaches:
+        await message.answer("😔 Пока нет ни одного тренера.")
+        return
+
+    from keyboards.common_kb import get_coach_pick_kb
+
+    await message.answer(
+        "🔗 <b>Переход из Соло-режима</b>\n\n"
+        "⚠️ При одобрении тренером ваш рейтинговый прогресс будет сброшен"
+        " (XP = 0, уровень = 1), а сольные тренировки останутся в личном архиве, "
+        "но не будут учтены в общем ТОПе.\n\n"
+        "Выберите тренера:",
+        reply_markup=get_coach_pick_kb(coaches),
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data == CALLBACK_SEND_REQUEST)
 async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
     """Гость нажал Inline-кнопку: создаем запись в users со статусом is_approved=False
@@ -358,7 +568,7 @@ async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
     ).scalar_one_or_none()
 
     # Повторное нажатие, пока заявка на рассмотрении
-    if user is not None and not user.is_approved:
+    if user is not None and not user.is_approved and not user.is_solo:
         await callback.answer(
             "⏳ Ваша заявка уже на рассмотрении у тренера. Дождитесь решения! 🙏",
             show_alert=True,
@@ -370,34 +580,54 @@ async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("✅ Вы уже одобрены тренером!", show_alert=True)
         return
 
-    # Создаем профиль спортсмена в БД со статусом НЕОДОБРЕН
-    new_user = User(
-        telegram_id=tg_id,
-        full_name=callback.from_user.full_name,
-        role="student",
-        is_approved=False,
-        level=1,  # Стартовый уровень в RPG-системе
-    )
-    session.add(new_user)
+    # Переход из Соло: пользователь уже есть в базе с is_solo=True
+    solo_transition = bool(user is not None and user.is_solo)
+
+    # Старый сценарий (заявка без выбора тренера) —fallback: шлем главному тренеру.
+    # Создаем профиль спортсмена в БД со статусом НЕОДОБРЕН (или обновляем соло-юзера)
+    if user is not None:
+        user.is_approved = False
+        user.is_solo = False
+        new_user = user
+    else:
+        new_user = User(
+            telegram_id=tg_id,
+            full_name=callback.from_user.full_name,
+            role="student",
+            is_approved=False,
+            level=1,  # Стартовый уровень в RPG-системе
+        )
+        session.add(new_user)
     await session.commit()
 
-    # Отправляем запрос тренеру на одобрение заявки
+    # Отправляем запрос главному тренеру (fallback)
+    chief = (
+        await session.execute(select(User).where(User.telegram_id == CHIEF_COACH_ID))
+    ).scalar_one_or_none()
     try:
         username = callback.from_user.username
         safe_name = escape(callback.from_user.full_name or "")
         safe_username = escape(username) if username else "нет"
-        await callback.bot.send_message(
-            chat_id=CHIEF_COACH_ID,
-            text=(
+        await notify_coach_about_request(
+            callback.bot,
+            chief or User(telegram_id=CHIEF_COACH_ID, full_name="Шеф"),
+            (
                 "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
-                f"Спортсмен: <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
+                + (
+                    "⚠️ <i>Переход из Соло-режима!</i>\n"
+                    f"Текущий прогресс: уровень {new_user.level}, XP {new_user.xp}"
+                    " (будет сброшен при одобрении)\n\n"
+                    if solo_transition
+                    else ""
+                )
+                + f"Спортсмен: <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
                 # f"Спортсмен: {safe_name}\n"
                 f"Username: @{safe_username}\n"
                 f"ID: <code>{tg_id}</code>\n\n"
                 "Разрешить ему доступ к тренировкам?"
             ),
-            reply_markup=get_approve_user_kb(tg_id),
-            parse_mode="HTML",
+            get_approve_user_kb(tg_id),
+            session,
         )
     except Exception as e:
         logger.error(f"Не удалось отправить уведомление тренеру: {e}")
@@ -421,8 +651,10 @@ async def guest_send_request(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("approve_user:"))
 async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
-    """Тренер одобряет заявку: юзер получает доступ к меню ученика"""
-    student_tg_id = int(callback.data.split(":")[1])
+    """Тренер одобряет заявку: юзер получает доступ к меню ученика.
+    callback: approve_user:<student_tg_id>:<coach_id|none>"""
+    parts = callback.data.split(":")
+    student_tg_id = int(parts[1])
 
     user = (
         await session.execute(select(User).where(User.telegram_id == student_tg_id))
@@ -437,6 +669,32 @@ async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
 
     user.is_approved = True
     await session.commit()
+
+    # Мульти-тренерство: создаем связь CoachStudent с тренером, который одобрил
+    approving_coach_id = (
+        int(parts[2]) if len(parts) > 2 and parts[2] != "none" else None
+    )
+    if user.role == "student" and approving_coach_id:
+        exists = (
+            await session.execute(
+                select(CoachStudent).where(
+                    CoachStudent.coach_id == approving_coach_id,
+                    CoachStudent.student_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not exists:
+            session.add(CoachStudent(coach_id=approving_coach_id, student_id=user.id))
+
+        # Переход из Соло: сбрасываем рейтинговый прогресс до стартового.
+        # Сольные тренировки (Workout.is_solo) остаются в архиве, но в общие
+        # и клубные рейтинги не попадают.
+        if user.is_solo:
+            user.is_solo = False
+            user.xp = 0
+            user.level = 1
+            user.title = "Новичок"
+        await session.commit()
 
     is_viewer = user.role == "viewer"
 
@@ -478,7 +736,7 @@ async def approve_user_handler(callback: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("reject_user:"))
 async def reject_user_handler(callback: CallbackQuery, session: AsyncSession):
-    """Тренер отклоняет заявку: юзер удаляется из базы"""
+    """Тренер отклоняет заявку: юзер удаляется из базы (reject_user:<tg_id>:<...>)"""
     student_tg_id = int(callback.data.split(":")[1])
 
     user = (

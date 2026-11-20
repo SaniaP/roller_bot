@@ -9,7 +9,15 @@ from sqlalchemy import select
 
 from aiogram.types import CallbackQuery
 
-from models import User, Workout, WorkoutRegistration, Trick, TrickLog, STATUS_ACTIVE
+from models import (
+    User,
+    Workout,
+    WorkoutRegistration,
+    Trick,
+    TrickLog,
+    STATUS_ACTIVE,
+    CoachStudent,
+)
 from keyboards.coach_kb import (
     get_coach_main_menu_sync,
     get_skater_workout_card_kb,
@@ -18,17 +26,35 @@ from keyboards.coach_kb import (
 )
 
 
-async def get_active_workout(session: AsyncSession) -> Workout | None:
-    """Возвращает активную тренировку (status='active'), если она есть"""
-    return (
-        await session.execute(select(Workout).where(Workout.status == STATUS_ACTIVE))
-    ).scalar_one_or_none()
+async def get_active_workout(
+    session: AsyncSession, coach_id: int | None = None
+) -> Workout | None:
+    """Возвращает активную тренировку (status='active'), если она есть.
+    coach_id задан — только активная тренировка этого тренера (изоляция
+    параллельных тренировок нескольких тренеров). coach_id is None —
+    активная соло-тренировка пользователя (is_solo=True)."""
+    stmt = select(Workout).where(Workout.status == STATUS_ACTIVE)
+    if coach_id is not None:
+        stmt = stmt.where(Workout.coach_id == coach_id)
+    else:
+        stmt = stmt.where(Workout.is_solo.is_(True))
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def get_coach_menu_for(session: AsyncSession):
-    """Возвращает главное меню тренера с учётом наличия активной тренировки"""
-    active_w = await get_active_workout(session)
+async def get_coach_menu_for(session: AsyncSession, coach_id: int):
+    """Возвращает главное меню тренера с учётом наличия ЕГО активной тренировки"""
+    active_w = await get_active_workout(session, coach_id=coach_id)
     return get_coach_main_menu_sync(has_active_workout=active_w is not None)
+
+
+async def get_coach_menu_for_tg(session: AsyncSession, telegram_id: int):
+    """Меню тренера по его telegram_id (удобно в хэндлерах callback'ов)."""
+    coach = (
+        await session.execute(select(User).where(User.telegram_id == telegram_id))
+    ).scalar_one_or_none()
+    if not coach:
+        return get_coach_main_menu_sync(has_active_workout=False)
+    return await get_coach_menu_for(session, coach.id)
 
 
 async def get_workout_students(session: AsyncSession, workout_id: int) -> list[User]:
@@ -48,6 +74,25 @@ async def get_workout_students(session: AsyncSession, workout_id: int) -> list[U
     for r in regs:
         st = await session.get(User, r.student_id)
         if st:
+            students.append(st)
+    return students
+
+
+async def get_coach_students(session: AsyncSession, coach_id: int) -> list[User]:
+    """Список учеников конкретного тренера (через CoachStudent)"""
+    links = (
+        (
+            await session.execute(
+                select(CoachStudent).where(CoachStudent.coach_id == coach_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    students = []
+    for link in links:
+        st = await session.get(User, link.student_id)
+        if st and st.role == "student":
             students.append(st)
     return students
 
@@ -119,12 +164,15 @@ def format_accuracy_text(percentage_mod: str | None) -> str:
     return f"{percentage_mod}%"
 
 
-def new_workout_now() -> Workout:
-    """Создает объект новой активной тренировки с PIN-кодом"""
+def new_workout_now(coach_id: int | None = None, is_solo: bool = False) -> Workout:
+    """Создает объект новой активной тренировки с PIN-кодом.
+    Для соло-тренировки — без PIN и без тренера."""
     return Workout(
         date=datetime.now(),
         status=STATUS_ACTIVE,
-        pin_code=generate_workout_pin(),
+        pin_code=None if is_solo else generate_workout_pin(),
+        coach_id=coach_id,
+        is_solo=is_solo,
     )
 
 

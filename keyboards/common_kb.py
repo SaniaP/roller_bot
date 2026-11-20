@@ -13,8 +13,10 @@ GUEST_REGISTER_BTN = "📝 Зарегистрироваться"
 VIEWER_WATCH_BTN = "👤 Наблюдать за персонажем"
 INLINE_BTN_SKATER = "🛼 Спортсмен"
 INLINE_BTN_VIEWER = "👀 Зритель"
+INLINE_BTN_SOLO = "🚀 Одиночный режим"
 CALLBACK_REG_ROLE_SKATER = "reg_role_skater"
 CALLBACK_REG_ROLE_VIEWER = "reg_role_viewer"
+CALLBACK_REG_ROLE_SOLO = "reg_role_solo"
 CALLBACK_VIEWER_CONFIRM = "viewer_send_request"
 HANDBOOK_BTN = "📚 База трюков"
 RATINGS_BTN = "📈 Рейтинги"
@@ -44,7 +46,7 @@ CALLBACK_SEND_REQUEST = "guest_send_request"
 
 
 def get_role_choice_kb() -> InlineKeyboardMarkup:
-    """Инлайн-выбор роли: [Спортсмен] [Зритель]."""
+    """Инлайн-выбор роли: [Спортсмен] [Зритель] / [Одиночный режим]."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -54,9 +56,31 @@ def get_role_choice_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text=INLINE_BTN_VIEWER, callback_data=CALLBACK_REG_ROLE_VIEWER
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text=INLINE_BTN_SOLO, callback_data=CALLBACK_REG_ROLE_SOLO
+                )
+            ],
         ]
     )
+
+
+def get_coach_pick_kb(coaches: list) -> InlineKeyboardMarkup:
+    """Inline-список тренеров для выбора при регистрации спортсмена.
+    В payload кнопки зашиваем id тренера."""
+    builder_rows = [
+        [
+            InlineKeyboardButton(
+                text=f"👑 {c.full_name}", callback_data=f"reg_pick_coach:{c.id}"
+            )
+        ]
+        for c in coaches
+    ]
+    builder_rows.append(
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="reg_pick_coach:cancel")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=builder_rows)
 
 
 def get_request_registration_kb() -> InlineKeyboardMarkup:

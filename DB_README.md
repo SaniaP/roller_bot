@@ -33,3 +33,5 @@ Heroes of Wheels and Slalom: Freestyle Chronicles
    • ТТ/ НТ пицца-фри: base_xp: 23 -> 22
    • ТТ/ НТ шарики: base_xp: 22 -> 21
    • TOTAL CROSS: base_xp: 26 -> 25
+
+

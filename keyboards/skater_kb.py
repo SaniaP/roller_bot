@@ -11,8 +11,22 @@ from aiogram import types
 # =====================================================================
 
 
-def get_student_main_menu() -> ReplyKeyboardMarkup:
-    """Главное меню ученика вне тренировочного процесса"""
+def get_student_main_menu(is_solo: bool = False) -> ReplyKeyboardMarkup:
+    """Главное меню ученика вне тренировочного процесса.
+    Для соло-спортсмена вместо PIN — кнопка личной тренировки и привязка к тренеру."""
+    if is_solo:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="👤 Мой персонаж")],
+                [KeyboardButton(text="▶️ Начать личную тренировку")],
+                [
+                    KeyboardButton(text="📚 База трюков"),
+                    KeyboardButton(text="📈 Рейтинги"),
+                ],
+                [KeyboardButton(text="🔗 Привязаться к тренеру")],
+            ],
+            resize_keyboard=True,
+        )
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Мой персонаж")],
@@ -21,6 +35,10 @@ def get_student_main_menu() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
+
+
+# Обратная совместимость: старое имя функции
+get_solo_main_menu = get_student_main_menu
 
 
 def get_student_training_menu() -> ReplyKeyboardMarkup:

@@ -432,6 +432,9 @@ async def _save_trick_log(
     student = await session.get(User, student_id)
     trick = await session.get(Trick, trick_id)
 
+    # Соло-спортсмен: трюки не на проверку, а сразу в зачет
+    solo_mode = bool(student and student.is_solo)
+
     # Расчет очков и EXP (общий для тренера и ученика)
     calc_points, calc_xp = await calculate_single_trick(
         trick=trick,
@@ -452,7 +455,7 @@ async def _save_trick_log(
         execution_multiplier=execution_multiplier,
         calculated_points=calc_points,
         calculated_xp=calc_xp,
-        needs_review=by_student,
+        needs_review=by_student and not solo_mode,
     )
     session.add(new_log)
     await session.commit()
@@ -462,18 +465,28 @@ async def _save_trick_log(
     await state.set_state(_ACTIVE_STATES[by_student])
 
     if by_student:
-        await message.answer(
-            f"✨ Трюк отправлен на проверку тренеру!\n\n"
-            f"🛹 Трюк: {trick.name}\n"
-            f"📏 Дорожка: {cone_line} см\n"
-            f"🪚 Пройдено конусов: {quantity} шт.\n\n"
-            f"📊 **Ожидаемое начисление:**\n"
-            f"• Баллы: +{calc_points}\n"
-            f"• Опыт: +{calc_xp} EXP\n\n"
-            f"⏳ Очки и EXP засчитаются после подтверждения тренером.",
-            reply_markup=_student_training_menu(),
-            parse_mode="Markdown",
-        )
+        if solo_mode:
+            await message.answer(
+                f"✅ Трюк <b>{trick.name}</b> засчитан!\n\n"
+                f"📏 Дорожка: {cone_line} см\n"
+                f"🪚 Пройдено конусов: {quantity} шт.\n\n"
+                f"✨ **Начислено сразу:** +{calc_points} баллов | +{calc_xp} EXP",
+                reply_markup=_student_training_menu(),
+                parse_mode="Markdown",
+            )
+        else:
+            await message.answer(
+                f"✨ Трюк отправлен на проверку тренеру!\n\n"
+                f"🛹 Трюк: {trick.name}\n"
+                f"📏 Дорожка: {cone_line} см\n"
+                f"🪚 Пройдено конусов: {quantity} шт.\n\n"
+                f"📊 **Ожидаемое начисление:**\n"
+                f"• Баллы: +{calc_points}\n"
+                f"• Опыт: +{calc_xp} EXP\n\n"
+                f"⏳ Очки и EXP засчитаются после подтверждения тренером.",
+                reply_markup=_student_training_menu(),
+                parse_mode="Markdown",
+            )
     else:
         accuracy_text = format_accuracy_text(percentage_mod)
         await message.answer(

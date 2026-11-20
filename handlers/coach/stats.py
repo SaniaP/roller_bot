@@ -30,9 +30,13 @@ from models import (
     Trick,
     LevelExperience,
     XpPenalty,
+    CoachStudent,
+    Community,
+    CommunityCoach,
 )
 from handlers.coach.helpers import (
     get_coach_menu_for,
+    get_coach_students,
     draw_progress_bar,
     level_progress_percent,
 )
@@ -48,6 +52,129 @@ def calculate_age(born: date) -> int:
     """Точный возраст с учетом месяца и дня рождения."""
     today = date.today()
     return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+# =====================================================================
+# ОБЛАСТИ ВИДИМОСТИ ТОПА (ЭТАП 5)
+# =====================================================================
+
+RATING_SCOPE_MY = "my"        # только ученики текущего тренера
+RATING_SCOPE_COMMUNITY = "community"  # ученики всех тренеров его комьюнити
+RATING_SCOPE_GLOBAL = "global"        # все подтвержденные спортсмены с тренерами
+
+
+async def _global_students(session: AsyncSession) -> list[User]:
+    """Фолбэк для списка профилей под рейтингом: все одобренные
+    не-соло спортсмены (если у тренера пока нет своих учеников)."""
+    return (
+        (
+            await session.execute(
+                select(User)
+                .where(
+                    User.role == "student",
+                    User.is_approved.is_(True),
+                    User.is_solo.is_(False),
+                )
+                .order_by(User.level.desc(), User.xp.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _coach_id_by_tg(session: AsyncSession, telegram_id: int) -> int | None:
+    """id тренера по telegram_id (или None)."""
+    user = (
+        await session.execute(select(User).where(User.telegram_id == telegram_id))
+    ).scalar_one_or_none()
+    if user and user.role == "coach":
+        return user.id
+    return None
+
+
+async def _rating_students_for_scope(
+    session: AsyncSession,
+    scope: str,
+    telegram_id: int,
+) -> list[int] | None:
+    """Возвращает список user_id спортсменов для выбранной области ТОПа.
+
+    scope:
+      my        — ученики текущего тренера (CoachStudent.coach_id);
+      community — ученики всех тренеров одного Community с тренером;
+      global    — все подтвержденные спортсмены с тренерами по всей базе.
+    None — область неприменима (например, у зрителя нет тренера).
+    """
+    coach_id = await _coach_id_by_tg(session, telegram_id)
+
+    if scope == RATING_SCOPE_MY:
+        if not coach_id:
+            return None
+        ids = (
+            (
+                await session.execute(
+                    select(CoachStudent.student_id).where(
+                        CoachStudent.coach_id == coach_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return ids or [0]
+
+    if scope == RATING_SCOPE_COMMUNITY:
+        if not coach_id:
+            return None
+        community_ids = (
+            (
+                await session.execute(
+                    select(CommunityCoach.community_id).where(
+                        CommunityCoach.coach_id == coach_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not community_ids:
+            return [0]
+        coach_ids = (
+            (
+                await session.execute(
+                    select(CommunityCoach.coach_id).where(
+                        CommunityCoach.community_id.in_(community_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ids = (
+            (
+                await session.execute(
+                    select(CoachStudent.student_id).where(
+                        CoachStudent.coach_id.in_(coach_ids or [0])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return ids or [0]
+
+    if scope == RATING_SCOPE_GLOBAL:
+        ids = (
+            (
+                await session.execute(select(CoachStudent.student_id).distinct())
+            )
+            .scalars()
+            .all()
+        )
+        return ids or [0]
+
+    return None
 
 
 class ProfileStates(StatesGroup):
@@ -134,13 +261,29 @@ async def build_rating_text(
     age: str,
     rank: str,
     limit: int | None = None,
+    scope: str | None = None,
+    telegram_id: int | None = None,
 ) -> str:
     """Универсальный текст рейтинга учеников с фильтрами сортировки,
-    возраста и ранга. limit (например 10) — жесткое ограничение для гостей."""
+    возраста и ранга. limit (например 10) — жесткое ограничение для гостей.
+
+    scope (ЭТАП 5): my / community / global — область видимости ТОПа.
+    Соло-спортсмены (is_solo=True) и соло-тренировки исключены всегда:
+    в рейтинг попадают только спортсмены, имеющие привязку в CoachStudent."""
     query = select(User).where(
         User.role == "student",
         User.is_approved == True,  # noqa: E712
+        # Соло-игроки не участвуют в общих/клубных рейтингах
+        User.is_solo.is_(False),
+        # Только спортсмены с тренером (привязка в CoachStudent)
+        User.id.in_(select(CoachStudent.student_id).distinct()),
     )
+
+    # Область видимости ТОПа
+    if scope and telegram_id:
+        scope_ids = await _rating_students_for_scope(session, scope, telegram_id)
+        if scope_ids is not None:
+            query = query.where(User.id.in_(scope_ids or [0]))
 
     # Фильтр ранга
     if rank == "novice":
@@ -182,7 +325,13 @@ async def build_rating_text(
         "exp": "сортировка по EXP",
         "score": "сортировка по очкам",
     }
-    lines = [f"📈 <b>Рейтинг учеников</b> ({titles.get(sort, sort)})\n"]
+    scope_titles = {
+        RATING_SCOPE_MY: "👤 мой ТОП",
+        RATING_SCOPE_COMMUNITY: "🏘 сообщество",
+        RATING_SCOPE_GLOBAL: "🌍 общий рейтинг",
+    }
+    scope_part = f" • {scope_titles[scope]}" if scope in scope_titles else ""
+    lines = [f"📈 <b>Рейтинг учеников</b> ({titles.get(sort, sort)}{scope_part})\n"]
 
     for i, st in enumerate(students, start=1):
         best_points = await _best_training_points(session, st.id)
@@ -208,15 +357,34 @@ def build_rating_keyboard(
     rank: str,
     is_coach: bool = False,
     students_list: list[User] | None = None,
+    scope: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Клавиатура фильтров рейтинга (паттерн выбора дорожек: активный
     параметр помечается ✅). Для тренера снизу прикрепляются кнопки
-    провала в профили учеников (_students_kb)."""
+    провала в профили учеников (_students_kb).
+    scope — активная область видимости ТОПа (my/community/global)."""
 
     def mark(active: bool) -> str:
         return "✅ " if active else ""
 
     builder = InlineKeyboardBuilder()
+
+    # Ряд 0 — область видимости ТОПа (только для тренера/ученика с тренером)
+    if scope is not None:
+        scopes = [
+            (RATING_SCOPE_MY, "👤 Мой ТОП"),
+            (RATING_SCOPE_COMMUNITY, "🏘 Сообщество"),
+            (RATING_SCOPE_GLOBAL, "🌍 Общий"),
+        ]
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=f"{mark(scope == val)}{label}",
+                    callback_data=f"rating:{sort}:{age}:{rank}:{val}",
+                )
+                for val, label in scopes
+            ]
+        )
     # Ряд 1 — сортировка
     builder.row(
         InlineKeyboardButton(
@@ -282,47 +450,62 @@ async def ratings(message: Message, session: AsyncSession):
         await message.answer(text, parse_mode="HTML")
         return
 
+    # Соло-спортсмен видит только свою личную статистику и прогресс
+    if user.is_solo:
+        await message.answer(
+            "🚀 <b>Вы в одиночном режиме</b>\n\n"
+            "Общий и клубный рейтинги доступны только спортсменам с тренером.\n"
+            "Ваша личная статистика и прогресс — в разделе «👤 Мой персонаж».",
+            parse_mode="HTML",
+        )
+        return
+
     # Сценарий В: главный тренер (по ТЕКУЩЕЙ роли в базе — в режиме
     # тестирования ученика он видит рейтинги как обычный пользователь)
     if user.role == "coach" and tg_id == CHIEF_COACH_ID:
-        students = (
-            (
-                await session.execute(
-                    select(User)
-                    .where(
-                        User.role == "student", User.is_approved == True
-                    )  # noqa: E712
-                    .order_by(User.level.desc(), User.xp.desc())
-                )
-            )
-            .scalars()
-            .all()
+        students = await get_coach_students(session, user.id) or await _global_students(session)
+        text = await build_rating_text(
+            session, "exp", "all", "all", scope=RATING_SCOPE_MY, telegram_id=tg_id
         )
-        text = await build_rating_text(session, "exp", "all", "all")
         await message.answer(
             text,
             reply_markup=build_rating_keyboard(
-                "exp", "all", "all", is_coach=True, students_list=students
+                "exp", "all", "all", is_coach=True,
+                students_list=students, scope=RATING_SCOPE_MY,
             ),
             parse_mode="HTML",
         )
         return
 
-    # Сценарий Б: ученик или зритель — фильтры без кнопок профилей
-    text = await build_rating_text(session, "exp", "all", "all")
+    # Сценарий Б: ученик или зритель — фильтры без кнопок профилей.
+    # У ученика с тренером доступен переключатель области ТОПа.
+    has_coach = bool(
+        await session.execute(
+            select(CoachStudent).where(CoachStudent.student_id == user.id).limit(1)
+        ).scalar_one_or_none()
+    )
+    scope = RATING_SCOPE_MY if has_coach else None
+    text = await build_rating_text(
+        session, "exp", "all", "all", scope=scope, telegram_id=tg_id
+    )
     await message.answer(
         text,
-        reply_markup=build_rating_keyboard("exp", "all", "all", is_coach=False),
+        reply_markup=build_rating_keyboard("exp", "all", "all", is_coach=False, scope=scope),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data.startswith("rating:"))
 async def rating_filters(callback: CallbackQuery, session: AsyncSession):
-    """Смена фильтров рейтинга «на лету» через edit_text."""
-    try:
-        _, sort, age, rank = callback.data.split(":")
-    except ValueError:
+    """Смена фильтров рейтинга «на лету» через edit_text.
+    Формат callback: rating:<sort>:<age>:<rank>[:<scope>]"""
+    parts = callback.data.split(":")
+    if len(parts) == 4:
+        _, sort, age, rank = parts
+        scope = None
+    elif len(parts) == 5:
+        _, sort, age, rank, scope = parts
+    else:
         await callback.answer("Некорректный фильтр", show_alert=True)
         return
 
@@ -341,25 +524,37 @@ async def rating_filters(callback: CallbackQuery, session: AsyncSession):
         await callback.answer()
         return
 
+    # Область видимости: тренеру — my/community/global; ученику с тренером — тоже
+    if is_coach:
+        scope = scope or RATING_SCOPE_MY
+    elif user is not None and user.is_solo:
+        await callback.answer(
+            "🚀 В одиночном режиме общие рейтинги недоступны.", show_alert=True
+        )
+        return
+    else:
+        has_coach = bool(
+            user
+            and (
+                await session.execute(
+                    select(CoachStudent)
+                    .where(CoachStudent.student_id == user.id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        )
+        if scope and not has_coach:
+            scope = None
+
     students_list = None
     if is_coach:
-        students_list = (
-            (
-                await session.execute(
-                    select(User)
-                    .where(
-                        User.role == "student", User.is_approved == True
-                    )  # noqa: E712
-                    .order_by(User.level.desc(), User.xp.desc())
-                )
-            )
-            .scalars()
-            .all()
-        )
+        students_list = await get_coach_students(session, user.id) or await _global_students(session)
 
-    text = await build_rating_text(session, sort, age, rank)
+    text = await build_rating_text(
+        session, sort, age, rank, scope=scope, telegram_id=tg_id
+    )
     new_kb = build_rating_keyboard(
-        sort, age, rank, is_coach=is_coach, students_list=students_list
+        sort, age, rank, is_coach=is_coach, students_list=students_list, scope=scope
     )
     await callback.message.edit_text(text, reply_markup=new_kb, parse_mode="HTML")
     await callback.answer()
@@ -367,26 +562,23 @@ async def rating_filters(callback: CallbackQuery, session: AsyncSession):
 
 @router.message(F.text == "📊 Статистика")
 async def coach_stats(message: Message, session: AsyncSession):
-    """Список всех учеников, отсортированный по уровню (по убыванию)"""
-    students = (
-        (
-            await session.execute(
-                select(User)
-                # .where(User.role == "student") временно убрал
-                .order_by(User.level.desc(), User.xp.desc())
-            )
-        )
-        .scalars()
-        .all()
-    )
+    """Статистика — выборка ТОЛЬКО учеников текущего тренера (CoachStudent)."""
+    coach_id = await _coach_id_by_tg(session, message.from_user.id)
+    if not coach_id:
+        await message.answer("⛔ Статистика доступна только тренерам.")
+        return
+
+    students = await get_coach_students(session, coach_id)
 
     if not students:
         await message.answer(
-            "📊 <b>Статистика</b>\n\nУчеников пока нет.",
-            reply_markup=await get_coach_menu_for(session),
+            "📊 <b>Статистика</b>\n\nУ вас пока нет учеников.",
+            reply_markup=await get_coach_menu_for(session, coach_id),
             parse_mode="HTML",
         )
         return
+
+    students.sort(key=lambda st: (st.level, st.xp), reverse=True)
 
     lines = ["📊 <b>Статистика учеников</b> (сортировка по уровню)\n"]
 
@@ -414,35 +606,35 @@ async def coach_stats(message: Message, session: AsyncSession):
 
 @router.message(F.text == "🏆 Рейтинг")
 async def coach_rating_entry(message: Message, session: AsyncSession):
-    """Reply-кнопка '🏆 Рейтинг': тот же рейтинг, что у учеников (сценарий Б),
-    но для главного тренера — с кнопками провала в профили учеников."""
-    students = (
-        (
-            await session.execute(
-                select(User)
-                .where(User.role == "student", User.is_approved == True)  # noqa: E712
-                .order_by(User.level.desc(), User.xp.desc())
-            )
-        )
-        .scalars()
-        .all()
+    """Reply-кнопка '🏆 Рейтинг' у тренера: ТОП его учеников
+    с переключателем области видимости (мой / сообщество / общий)."""
+    coach_id = await _coach_id_by_tg(session, message.from_user.id)
+    if not coach_id:
+        await message.answer("⛔ Рейтинг доступен только тренерам.")
+        return
+    students = await get_coach_students(session, coach_id)
+    text = await build_rating_text(
+        session, "exp", "all", "all", scope=RATING_SCOPE_MY,
+        telegram_id=message.from_user.id,
     )
-    text = await build_rating_text(session, "exp", "all", "all")
     await message.answer(
         text,
         reply_markup=build_rating_keyboard(
-            "exp", "all", "all", is_coach=True, students_list=students
+            "exp", "all", "all", is_coach=True,
+            students_list=students, scope=RATING_SCOPE_MY,
         ),
         parse_mode="HTML",
     )
 
 
 async def _best_training_points(session: AsyncSession, student_id: int) -> float | None:
-    """Лучший (максимальный) результат training_points спортсмена по всем тренировкам"""
+    """Лучший (максимальный) результат training_points спортсмена.
+    Соло-тренировки (Workout.is_solo) в рейтинге очков не учитываются."""
     return await session.scalar(
         select(func.max(WorkoutRegistration.training_points)).where(
-            WorkoutRegistration.student_id == student_id
-        )
+            WorkoutRegistration.student_id == student_id,
+            Workout.is_solo.is_(False),
+        ).join(Workout, Workout.id == WorkoutRegistration.workout_id)
     )
 
 
@@ -1015,16 +1207,14 @@ async def stats_workout_details(
 
 @router.callback_query(StatsAction.filter(F.action == "stats_back"))
 async def stats_back_to_list(callback: CallbackQuery, session: AsyncSession):
-    """Возврат к списку учеников"""
+    """Возврат к списку учеников (только ученики текущего тренера)"""
+    coach_id = await _coach_id_by_tg(session, callback.from_user.id)
     students = (
-        (
-            await session.execute(
-                select(User).order_by(User.level.desc(), User.xp.desc())
-            )
-        )
-        .scalars()
-        .all()
+        await get_coach_students(session, coach_id)
+        if coach_id
+        else await _global_students(session)
     )
+    students.sort(key=lambda st: (st.level, st.xp), reverse=True)
 
     text = "📊 <b>Статистика учеников</b> (сортировка по уровню)\n\n"
     if students:

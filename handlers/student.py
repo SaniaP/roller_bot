@@ -14,18 +14,19 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, distinct
+from datetime import datetime, timezone
 
 # Твои реальные модели из проекта
-from models import User, Workout, WorkoutRegistration, Trick, TrickLog, STATUS_ACTIVE
-
-# Общая функция построения профиля + инлайн-кнопок деталей тренировок
-from handlers.coach.stats import (
-    build_student_profile_text,
-    _workout_details_kb,
-    send_profile_message,
+from models import (
+    User,
+    Workout,
+    WorkoutRegistration,
+    Trick,
+    TrickLog,
+    STATUS_ACTIVE,
+    STATUS_CLOSED,
+    CoachStudent,
 )
-
-# как мы считаем если их не используем?)
 from calculator import (  # noqa: F401 — используется в хендлерах ниже и внешними импортами
     calculate_single_trick,
     calculate_current_workout_totals,
@@ -34,6 +35,7 @@ from calculator import (  # noqa: F401 — используется в хенд�
 from keyboards.skater_kb import (
     get_student_main_menu,
     get_student_training_menu,
+    get_solo_main_menu,
 )
 from keyboards.common_kb import HANDBOOK_BTN
 from handlers.coach.stats import (
@@ -57,6 +59,11 @@ router = Router()
 # =====================================================================
 
 
+# =====================================================================
+# РЕЖИМ СОЛО: ЛИЧНАЯ ТРЕНИРОВКА АВТОНОМНОГО СПОРТСМЕНА
+# =====================================================================
+
+
 @router.message(F.text == "🔑 Подключиться к тренировке")
 async def student_ask_for_pin(
     message: Message, state: FSMContext, session: AsyncSession
@@ -67,6 +74,15 @@ async def student_ask_for_pin(
 
     if not user or not user.is_approved:
         await message.answer("❌ Ваша учетная запись еще не одобрена тренером.")
+        return
+
+    # Соло-спортсмен не подключается к тренировкам тренера — у него личная кнопка
+    if user.is_solo:
+        await message.answer(
+            "🚀 Вы в одиночном режиме — PIN не нужен.\n"
+            "Нажмите «▶️ Начать личную тренировку».",
+            reply_markup=get_student_main_menu(is_solo=True),
+        )
         return
 
     await state.set_state(StudentStates.waiting_for_pin)
@@ -81,7 +97,171 @@ async def student_ask_for_pin(
 @router.message(StudentStates.waiting_for_pin, F.text == "❌ Отмена войти")
 async def cancel_pin_input(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Вход отменен.", reply_markup=get_student_main_menu())
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    await message.answer(
+        "Вход отменен.", reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo))
+    )
+
+
+@router.message(F.text == "▶️ Начать личную тренировку")
+async def solo_start_workout(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Соло-спортсмен начинает личную тренировку без тренера и PIN-кода."""
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+
+    if not user or not user.is_approved:
+        await message.answer("❌ Ваша учетная запись еще не одобрена.")
+        return
+    if not user.is_solo:
+        await message.answer(
+            "⛔ Личная тренировка доступна только в одиночном режиме.",
+            reply_markup=get_student_main_menu(),
+        )
+        return
+
+    # Уже есть активная личная тренировка — продолжаем её
+    active_w = (
+        await session.execute(
+            select(Workout).where(
+                Workout.status == STATUS_ACTIVE,
+                Workout.is_solo.is_(True),
+            )
+        )
+    ).scalars().all()
+    solo_active = next(
+        (
+            w
+            for w in active_w
+            if any(
+                r.student_id == user.id
+                for r in (
+                    await session.execute(
+                        select(WorkoutRegistration).where(
+                            WorkoutRegistration.workout_id == w.id,
+                            WorkoutRegistration.student_id == user.id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        ),
+        None,
+    )
+
+    workout = solo_active
+    if workout is None:
+        workout = Workout(
+            date=datetime.now(timezone.utc),
+            status=STATUS_ACTIVE,
+            pin_code=None,
+            coach_id=None,
+            is_solo=True,
+        )
+        session.add(workout)
+        await session.flush()
+        session.add(
+            WorkoutRegistration(workout_id=workout.id, student_id=user.id)
+        )
+        await session.commit()
+        await message.answer(
+            f"🚀 <b>Личная тренировка №{workout.id} начата!</b>\n\n"
+            "Трюки засчитываются сразу, без судейства.",
+            reply_markup=get_student_training_menu(),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"↩️ Продолжаем личную тренировку №{workout.id}.",
+            reply_markup=get_student_training_menu(),
+        )
+
+    await state.update_data(current_workout_id=workout.id)
+    await state.set_state(StudentStates.training_active)
+
+
+@router.message(StudentStates.training_active, F.text == "🏁 Завершить тренировку")
+async def solo_finish_workout(
+    message: Message, state: FSMContext, session: AsyncSession
+):
+    """Соло-спортсмен завершает личную тренировку: закрытие, начисление XP,
+    пересчет уровня и сохранение отчета."""
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    data = await state.get_data()
+    workout_id = data.get("current_workout_id")
+
+    workout = await session.get(Workout, workout_id) if workout_id else None
+    if not workout or not workout.is_solo:
+        await message.answer(
+            "❌ Активной личной тренировки не найдено.",
+            reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo)),
+        )
+        await state.clear()
+        return
+
+    reg = (
+        await session.execute(
+            select(WorkoutRegistration).where(
+                WorkoutRegistration.workout_id == workout.id,
+                WorkoutRegistration.student_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    logs = (
+        (
+            await session.execute(
+                select(TrickLog).where(
+                    TrickLog.workout_id == workout.id,
+                    TrickLog.student_id == user.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    final_points, final_xp = await calculate_current_workout_totals(
+        logs, user, session
+    )
+    if reg:
+        reg.training_points = final_points
+        reg.training_xp = final_xp
+    user.xp += final_xp
+
+    new_level, level_upgraded = await check_level_up(
+        user.level, user.xp, session
+    )
+    lvl_text = ""
+    if level_upgraded:
+        user.level = new_level
+        if reg:
+            reg.caused_level_up = True
+        lvl_text = f"\n🔥 <b>LEVEL UP! Новый уровень: {new_level}!</b>"
+
+    workout.status = STATUS_CLOSED
+    await session.commit()
+    await state.clear()
+
+    await message.answer(
+        f"🏁 <b>Личная тренировка завершена!</b>\n\n"
+        f"🛹 Итог: {final_points:.1f} очков, +{final_xp} EXP{lvl_text}\n"
+        f"Отчет сохранен в вашем архиве («👤 Мой персонаж»).",
+        reply_markup=get_student_main_menu(is_solo=True),
+        parse_mode="HTML",
+    )
 
 
 @router.message(StudentStates.waiting_for_pin)
@@ -489,12 +669,17 @@ async def student_today_stats(
 
 
 @router.message(StudentStates.training_active, F.text == "🚪 Покинуть тренировку")
-async def student_leave_workout(message: Message, state: FSMContext):
+async def student_leave_workout(message: Message, state: FSMContext, session: AsyncSession):
     """Сбрасывает состояние и возвращает ученика в главное меню"""
     await state.clear()
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
     await message.answer(
         "🚪 Вы поехали отдыхать. Тренировка покинута!",
-        reply_markup=get_student_main_menu(),
+        reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo)),
     )
 
 

@@ -15,6 +15,7 @@ from models import (
     TrickLog,
     STATUS_ACTIVE,
     STATUS_CLOSED,
+    CoachStudent,
 )
 from states.workout_states import CoachWorkoutStates
 from keyboards.coach_kb import (
@@ -38,8 +39,17 @@ router = Router()
 async def coach_start_workout(
     message: Message, state: FSMContext, session: AsyncSession
 ):
-    """Открытие/продолжение тренировки. Если активная есть — открываем её меню"""
-    active_workout = await get_active_workout(session)
+    """Открытие/продолжение тренировки. Если активная у ЭТОГО тренера есть — открываем её меню"""
+    coach = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    if not coach or coach.role != "coach":
+        await message.answer("⛔ Только тренер может начать тренировку.")
+        return
+
+    active_workout = await get_active_workout(session, coach_id=coach.id)
 
     if active_workout:
         # Продолжаем: собираем текущий список спортсменов на занятии
@@ -55,8 +65,8 @@ async def coach_start_workout(
         )
         return
 
-    # --- ЕСЛИ ТРЕНИРОВКИ НЕТ, СОЗДАЕМ НОВУЮ С PIN-КОДОМ ---
-    new_workout = new_workout_now()
+    # --- ЕСЛИ ТРЕНИРОВКИ НЕТ, СОЗДАЕМ НОВУЮ С PIN-КОДОМ (владелец — тренер) ---
+    new_workout = new_workout_now(coach_id=coach.id)
     session.add(new_workout)
     await session.commit()
 
@@ -76,7 +86,7 @@ async def coach_start_workout(
     # «Продолжить тренировку», а не «Начать тренировку»
     await message.answer(
         "🏋️ Тренировка активна.",
-        reply_markup=await get_coach_menu_for(session),
+        reply_markup=await get_coach_menu_for(session, coach.id),
     )
 
 
@@ -100,8 +110,26 @@ async def add_skater_from_db_list(
         .all()
     )
 
-    # Достаем остальных
-    stmt = select(User).where(User.role == "student")
+    # Достаем ТОЛЬКО учеников этого тренера (изоляция мульти-тренерства)
+    coach = (
+        await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+    ).scalar_one_or_none()
+    stmt = select(User).where(User.role == "student", User.is_solo.is_(False))
+    if coach:
+        my_student_ids = (
+            (
+                await session.execute(
+                    select(CoachStudent.student_id).where(
+                        CoachStudent.coach_id == coach.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        stmt = stmt.where(User.id.in_(my_student_ids or [0]))
     if added_ids:
         stmt = stmt.where(User.id.not_in(added_ids))
 
@@ -185,7 +213,7 @@ async def process_finish_workout(
         await callback.message.delete()
         await callback.message.answer(
             "🏁 Тренировка завершена (учеников не было).",
-            reply_markup=await get_coach_menu_for(session),
+            reply_markup=await get_coach_menu_for(session, coach.id),
         )
         return
 
@@ -292,5 +320,5 @@ async def process_finish_workout(
 
     await callback.message.delete()
     await callback.message.answer(
-        summary_report, reply_markup=await get_coach_menu_for(session)
+        summary_report, reply_markup=await get_coach_menu_for_tg(session, callback.from_user.id)
     )
