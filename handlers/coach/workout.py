@@ -25,6 +25,7 @@ from keyboards.coach_kb import (
 from calculator import calculate_current_workout_totals, check_level_up
 from handlers.coach.helpers import (
     get_coach_menu_for,
+    get_coach_menu_for_tg,
     get_active_workout,
     get_workout_students,
     new_workout_now,
@@ -213,7 +214,9 @@ async def process_finish_workout(
         await callback.message.delete()
         await callback.message.answer(
             "🏁 Тренировка завершена (учеников не было).",
-            reply_markup=await get_coach_menu_for(session, coach.id),
+            reply_markup=await get_coach_menu_for_tg(
+                session, callback.from_user.id
+            ),
         )
         return
 

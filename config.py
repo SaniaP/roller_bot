@@ -17,5 +17,5 @@ if ENV == "production":
 else:
     # Путь для локальной разработки (абсолютный: не зависит от текущей папки,
     # поэтому скрипты можно запускать и из scripts/)
-    DB_PATH = os.path.join(BASE_DIR, "roller_school.db").replace("\\", "/")
-    DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
+    # DB_PATH = os.path.join(BASE_DIR, "roller_school.db").replace("\\", "/")
+    DATABASE_URL = "sqlite+aiosqlite:///roller_school.db"
