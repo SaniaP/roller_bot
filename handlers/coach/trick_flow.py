@@ -494,7 +494,7 @@ async def _save_trick_log(
                 f"🪚 Пройдено конусов: {quantity} шт.\n\n"
                 f"✨ **Начислено сразу:** +{calc_points} баллов | +{calc_xp} EXP",
                 reply_markup=_student_training_menu(solo_mode),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         else:
             await message.answer(

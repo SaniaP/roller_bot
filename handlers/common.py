@@ -287,31 +287,45 @@ async def guest_pick_coach(callback: CallbackQuery, session: AsyncSession):
     existing = (
         await session.execute(select(User).where(User.telegram_id == tg_id))
     ).scalar_one_or_none()
-    if existing:
-        await callback.answer(
-            "⏳ Ваша заявка уже на рассмотрении у тренера.", show_alert=True
-        )
+
+    solo_transition = False
+    if existing is not None and not existing.is_solo:
+        # Уже на рассмотрении ИЛИ уже одобренный спортсмен/зритель
+        if existing.is_approved:
+            await callback.answer(
+                "✅ Вы уже занимаетесь с тренером — новая заявка не нужна.",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                "⏳ Ваша заявка уже на рассмотрении у тренера.", show_alert=True
+            )
         return
 
-    # ПроверкаSolo-переход: пользователь уже есть в базе с is_solo=True
-    solo_transition = bool(existing and existing.is_solo)
-
-    if existing and not existing.is_solo:
-        await callback.answer(
-            "⏳ Ваша заявка уже на рассмотрении у тренера.", show_alert=True
+    if existing is not None and existing.is_solo:
+        # Переход из Соло: сбрасываем рейтинговый прогресс полностью.
+        # Логи тренировок (TrickLog) и архив соло-тренировок остаются —
+        # но в общие/клубные рейтинги они не попадают.
+        solo_transition = True
+        existing.is_solo = False
+        existing.is_approved = False
+        existing.role = "student"
+        existing.level = 1
+        existing.xp = 0
+        existing.title = "Новичок"
+        new_user = existing
+        await session.commit()
+    else:
+        new_user = User(
+            telegram_id=tg_id,
+            full_name=callback.from_user.full_name or "Спортсмен",
+            role="student",
+            is_approved=False,
+            is_solo=False,
+            level=1,
         )
-        return
-
-    new_user = User(
-        telegram_id=tg_id,
-        full_name=callback.from_user.full_name or "Спортсмен",
-        role="student",
-        is_approved=False,
-        is_solo=False,
-        level=1,
-    )
-    session.add(new_user)
-    await session.commit()
+        session.add(new_user)
+        await session.commit()
 
     username = callback.from_user.username
     safe_name = escape(new_user.full_name or "")
@@ -321,7 +335,13 @@ async def guest_pick_coach(callback: CallbackQuery, session: AsyncSession):
         coach,
         (
             "🔔 <b>Новая заявка на регистрацию!</b>\n\n"
-            f"Спортсмен: <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
+            + (
+                "⚠️ <i>Переход из Соло-режима!</i>\n"
+                "Рейтинговый прогресс будет сброшен при одобрении.\n\n"
+                if solo_transition
+                else ""
+            )
+            + f"Спортсмен: <a href='tg://user?id={tg_id}'>{safe_name}</a>\n"
             f"Username: @{safe_username}\n"
             f"ID: <code>{tg_id}</code>\n\n"
             "Разрешить ему доступ к тренировкам?"
