@@ -155,7 +155,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
                 f"🛹 Привет, <b>{escape(user.full_name or '')}</b>!\n"
                 f"Твой текущий уровень: <b>{user.level}</b> лвл. Ты готов прокачаться?!\n"
                 "Выбирай действие на панели управления:",
-                reply_markup=get_student_main_menu(),
+                reply_markup=get_student_main_menu(is_solo=bool(user.is_solo)),
                 parse_mode="HTML",
             )
 

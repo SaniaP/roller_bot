@@ -244,11 +244,16 @@ async def show_skater_card_or_main_list(
     ]
 
     # --- Связки блоками, затем одиночные трюки (как в журнале тренировки)
-    from handlers.coach.stats import _combo_exp_map
+    from handlers.coach.stats import _combo_exp_map, _workout_breakdown, _result_mark
     from models import LevelExperience
 
     pairs = [(log, tricks.get(log.trick_id)) for log in logs]
     combo_exp = await _combo_exp_map(pairs, student, session)
+
+    level_reqs = await session.get(LevelExperience, student.level)
+    notes, penalties, combo_in_game, combo_in_sport, penalty_info = _workout_breakdown(
+        pairs, level_reqs, combo_exp
+    )
 
     combos: dict[str, list[tuple]] = {}
     singles: list[tuple] = []
@@ -274,41 +279,37 @@ async def show_skater_card_or_main_list(
         lines.append("")
         for log, trick in singles:
             name = trick.name if trick else "Трюк"
-            lines.append(f"• {name} 🏅✨")
+            mark = _result_mark(notes.get(log.id))
+            lines.append(f"• {name}{mark}")
             lines.append(
                 f"{log.quantity} кон. ({log.cone_line}) — {log.calculated_points:.1f} очк. | +{log.calculated_xp} EXP"
             )
 
-    # --- Живая шапка: база = сумма лучших 8 / 8, штраф = 3.0 за недостающую категорию,
-    # опыт = топ-N трюков/связок по EXP (N = max_workout_logs из LevelExperience),
-    # каждый шаг связки идет в топ-8 очков
+    # --- Живая шапка: итоги считаются через _workout_breakdown (единая
+    # логика с калькулятором и журналом ученика)
+    xp_used = sport_used = categories_count = 0
+    points_penalty = 0.0
+    if penalty_info:
+        xp_used = penalty_info.get("xp_used", 0)
+        sport_used = penalty_info.get("sport_used", 0)
+        categories_count = penalty_info.get("categories_count", 0)
+        points_penalty = penalty_info.get("points_penalty", 0.0)
+
+    # Очки: та же расширенная выборка, что в _workout_breakdown —
+    # шаги связок участвуют лично, плюс агрегат связки на последнем шаге
     sport_results: list[float] = []
-    xp_results: list[int] = []
     for log, _t in pairs:
-        if not log.combo_id:
-            sport_results.append(log.calculated_points)
-            xp_results.append(log.calculated_xp)
+        sport_results.append(log.calculated_points)
     for cid, steps in combos.items():
-        for s_log, _t in steps:
-            sport_results.append(s_log.calculated_points)
         last_log = steps[-1][0]
         sport_results.append(last_log.calculated_points + (last_log.combo_bonus or 0.0))
-        xp_results.append(combo_exp.get(cid, 0))
-
-    level_reqs = await session.get(LevelExperience, student.level)
-    categories_count = len({t.category for t in tricks.values() if t})
-
     sport_results.sort(reverse=True)
     base_points = sum(sport_results[:8]) / 8.0
-    penalty = 0.0
-    if level_reqs:
-        missing = max(0, level_reqs.min_trick_categories - categories_count)
-        penalty = missing * 3.0
-    live_score = round(base_points - penalty, 2)
+    live_score = round(base_points - points_penalty, 2)
 
-    xp_results.sort(reverse=True)
-    live_xp = sum(
-        xp_results[: (level_reqs.max_workout_logs if level_reqs else 10)]
+    # Опыт: агрегаты связок + одиночные трюки (шаги связок лично не в зачете)
+    live_xp = sum(combo_exp.values()) + sum(
+        log.calculated_xp for log, _t in pairs if not log.combo_id
     )
 
     max_logs = level_reqs.max_workout_logs if level_reqs else 10
@@ -320,12 +321,12 @@ async def show_skater_card_or_main_list(
     lines.append("")
     lines.append("Предварительно:")
     pts_line = f"🏅 {live_score:.2f}"
-    if penalty:
-        pts_line += f" (- штраф {penalty:.1f})"
+    if points_penalty:
+        pts_line += f" (- штраф {points_penalty:.1f})"
     lines.append(
         f"{pts_line} | ✨ +{live_xp} EXP\n"
-        f"Зачет: ✨ {min(len(xp_results), max_logs)}/{max_logs} {_chk(len(xp_results), max_logs)} • "
-        f"🏅 {min(len(sport_results), 8)}/8 {_chk(len(sport_results), 8)} • "
+        f"Зачет: ✨ {xp_used}/{max_logs} {_chk(xp_used, max_logs)} • "
+        f"🏅 {sport_used}/8 {_chk(sport_used, 8)} • "
         f"Кат: {categories_count}/{min_categories} {_chk(categories_count, min_categories)}"
     )
 
