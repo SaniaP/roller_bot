@@ -43,19 +43,23 @@ get_solo_main_menu = get_student_main_menu
 
 def get_student_training_menu(is_solo: bool = False) -> ReplyKeyboardMarkup:
     """Меню ученика во время активной тренировки на споте.
-    У соло-спортсмена — завершение личной тренировки и возврат назад."""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🛼 Отправить выполненный трюк")],
-            [KeyboardButton(text="🧩 Отправить связку")],
-            [KeyboardButton(text="📊 Мои очки за сегодня")],
-            [
-                KeyboardButton(text="🏁 Завершить тренировку"),
-                KeyboardButton(text="⬅️ Назад"),
-            ],
+    Тренировку обычного ученика завершает тренер, поэтому кнопка
+    «🏁 Завершить тренировку» есть только у соло-спортсмена."""
+    keyboard = [
+        [KeyboardButton(text="🛼 Отправить выполненный трюк")],
+        [
+            KeyboardButton(text="🧩 Отправить связку"),
+            KeyboardButton(text="↩️ Отменить последнее"),
         ],
-        resize_keyboard=True,
-    )
+        [KeyboardButton(text="📊 Мои очки за сегодня")],
+        [
+            *(  # финишь — только соло (личную тренировку завершает сам спортсмен)
+                [KeyboardButton(text="🏁 Завершить тренировку")] if is_solo else []
+            ),
+            KeyboardButton(text="⬅️ Назад"),
+        ],
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 # Клавиатура выбора дорожки слалома

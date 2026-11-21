@@ -219,6 +219,10 @@ async def process_cancel_input(
     if by_student:
         from keyboards.skater_kb import get_student_training_menu
 
+        # Ученик может быть соло-спортсменом — меню с «🏁 Завершить тренировку»
+        student = await session.get(User, student_id)
+        is_solo = bool(student and student.is_solo)
+
         # Сбрасываем состояние в активную тренировку ученика
         await state.clear()
         await state.set_state(StudentStates.training_active)
@@ -234,7 +238,8 @@ async def process_cancel_input(
 
         # Отправляем чистое Reply-меню активной тренировки
         await callback.message.answer(
-            "↩️ Ввод трюка отменен.", reply_markup=get_student_training_menu()
+            "↩️ Ввод трюка отменен.",
+            reply_markup=get_student_training_menu(is_solo=is_solo),
         )
 
     # 2. Если отменяет ТРЕНЕР
@@ -297,6 +302,11 @@ async def cancel_input_on_other_action(
     if by_student:
         from keyboards.skater_kb import get_student_training_menu
 
+        is_solo = False
+        if student_id:
+            student = await session.get(User, student_id)
+            is_solo = bool(student and student.is_solo)
+
         await state.clear()
         await state.set_state(StudentStates.training_active)
         await state.update_data(current_workout_id=workout_id)
@@ -308,7 +318,7 @@ async def cancel_input_on_other_action(
 
         await callback.message.answer(
             "↩️ Ввод количества конусов отменен.",
-            reply_markup=get_student_training_menu(),
+            reply_markup=get_student_training_menu(is_solo=is_solo),
         )
         await callback.answer("Ввод отменен")
 
@@ -483,7 +493,7 @@ async def _save_trick_log(
                 f"📏 Дорожка: {cone_line} см\n"
                 f"🪚 Пройдено конусов: {quantity} шт.\n\n"
                 f"✨ **Начислено сразу:** +{calc_points} баллов | +{calc_xp} EXP",
-                reply_markup=_student_training_menu(),
+                reply_markup=_student_training_menu(solo_mode),
                 parse_mode="Markdown",
             )
         else:
@@ -496,7 +506,7 @@ async def _save_trick_log(
                 f"• Баллы: +{calc_points}\n"
                 f"• Опыт: +{calc_xp} EXP\n\n"
                 f"⏳ Очки и EXP засчитаются после подтверждения тренером.",
-                reply_markup=_student_training_menu(),
+                reply_markup=_student_training_menu(solo_mode),
                 parse_mode="Markdown",
             )
     else:
@@ -535,11 +545,11 @@ def _coach_after_save_kb(workout_id: int, student_id: int):
     return builder.as_markup()
 
 
-def _student_training_menu():
+def _student_training_menu(is_solo: bool = False):
     """Reply-меню ученика после сохранения трюка."""
     from keyboards.skater_kb import get_student_training_menu
 
-    return get_student_training_menu()
+    return get_student_training_menu(is_solo=is_solo)
 
 
 # =====================================================================

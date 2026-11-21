@@ -176,13 +176,13 @@ async def solo_start_workout(
         await message.answer(
             f"🚀 <b>Личная тренировка №{workout.id} начата!</b>\n\n"
             "Трюки засчитываются сразу, без судейства.",
-            reply_markup=get_student_training_menu(),
+            reply_markup=get_student_training_menu(is_solo=True),
             parse_mode="HTML",
         )
     else:
         await message.answer(
             f"↩️ Продолжаем личную тренировку №{workout.id}.",
-            reply_markup=get_student_training_menu(),
+            reply_markup=get_student_training_menu(is_solo=True),
         )
 
     await state.update_data(current_workout_id=workout.id)
@@ -209,7 +209,7 @@ async def solo_finish_workout(
         await message.answer(
             "⛔ Завершить тренировку может только соло-спортсмен на своей "
             "личной тренировке. Тренерскую тренировку закрывает тренер.",
-            reply_markup=get_student_training_menu(),
+            reply_markup=get_student_training_menu(is_solo=True),
         )
         return
     if not workout or not workout.is_solo:
@@ -384,7 +384,7 @@ async def student_process_pin(
         "✅ Вы успешно подключились к тренировке!\n\n"
         "Теперь вы можете самостоятельно отправлять выполненные трюки.\n"
         "Шнурки завязаны, бакли затянуты — погнали! 🚀",
-        reply_markup=get_student_training_menu(),
+        reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
     )
 
 
@@ -539,6 +539,90 @@ async def student_start_combo(
     await state.set_state(ComboBuilderStates.choosing_first_trick)
 
 
+@router.message(StudentStates.training_active, F.text == "↩️ Отменить последнее")
+async def student_undo_last(message: Message, state: FSMContext, session: AsyncSession):
+    """Отмена последнего действия ученика: одиночный трюк или связка
+    (по последнему TrickLog). Соло-спортсмену начисленные очки/EXP уже
+    выданы — при отмене они вычитаются из профиля."""
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+    if not user:
+        await message.answer("❌ Профиль не найден.")
+        return
+
+    data = await state.get_data()
+    workout_id = data.get("current_workout_id")
+    workout = await session.get(Workout, workout_id) if workout_id else None
+    if not workout:
+        await message.answer(
+            "❌ Активная тренировка не найдена.",
+            reply_markup=get_student_main_menu(is_solo=bool(user.is_solo)),
+        )
+        await state.clear()
+        return
+
+    last_log = await session.scalar(
+        select(TrickLog)
+        .where(TrickLog.workout_id == workout.id, TrickLog.student_id == user.id)
+        .order_by(TrickLog.id.desc())
+        .limit(1)
+    )
+    if not last_log:
+        await message.answer(
+            "📭 Нечего отменять: вы пока не отправляли трюки на этой тренировке.",
+            reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
+        )
+        return
+
+    is_combo = last_log.combo_id is not None
+    if is_combo:
+        # Удаляем всю связку целиком
+        combo_logs = (
+            (
+                await session.execute(
+                    select(TrickLog).where(
+                        TrickLog.workout_id == workout.id,
+                        TrickLog.student_id == user.id,
+                        TrickLog.combo_id == last_log.combo_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        removed_points = sum(l.calculated_points or 0 for l in combo_logs)
+        removed_xp = sum(l.calculated_xp or 0 for l in combo_logs)
+        for l in combo_logs:
+            await session.delete(l)
+        label = f"связка ({len(combo_logs)} трюков)"
+    else:
+        removed_points = last_log.calculated_points or 0
+        removed_xp = last_log.calculated_xp or 0
+        await session.delete(last_log)
+        label = "последний трюк"
+
+    # Соло-спортсмену очки/EXP начислялись сразу — вычитаем их обратно
+    if user.is_solo:
+        user.xp = max(0, (user.xp or 0) - removed_xp)
+        # Если уровень вырос за счет отмененных очков — оставляем уровень,
+        # но XP не опускаем ниже нуля (пересчет уровня делается при закрытии)
+
+    await session.commit()
+    await message.answer(
+        f"🗑 Отменено: {label}.\n"
+        + (
+            "Запись удалена, на проверку тренеру не попадет.\n"
+            if not user.is_solo
+            else ""
+        )
+        + "Можете продолжать тренировку.",
+        reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
+    )
+
+
 @router.message(StudentStates.training_active, F.text == "📊 Мои очки за сегодня")
 async def student_today_stats(
     message: Message, state: FSMContext, session: AsyncSession
@@ -606,7 +690,7 @@ async def student_today_stats(
     if not logs:
         await message.answer(
             "📭 Вы пока не отправляли трюки на этой тренировке.",
-            reply_markup=get_student_training_menu(),
+            reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
         )
         return
 
@@ -631,7 +715,7 @@ async def student_today_stats(
     )
     await message.answer(
         text,
-        reply_markup=get_student_training_menu(),
+        reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
         parse_mode="HTML",
     )
 

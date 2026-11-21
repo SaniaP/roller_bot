@@ -99,7 +99,7 @@ async def _restore_menu_after_combo(
         # Отправляем ученику одно чистое сообщение
         await target.answer(
             msg_text,
-            reply_markup=get_student_training_menu(),
+            reply_markup=get_student_training_menu(is_solo=bool(saver.is_solo)),
         )
 
     # === ЛОГИКА ТРЕНЕРА ===
