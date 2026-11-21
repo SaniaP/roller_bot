@@ -58,9 +58,9 @@ def calculate_age(born: date) -> int:
 # ОБЛАСТИ ВИДИМОСТИ ТОПА (ЭТАП 5)
 # =====================================================================
 
-RATING_SCOPE_MY = "my"        # только ученики текущего тренера
+RATING_SCOPE_MY = "my"  # только ученики текущего тренера
 RATING_SCOPE_COMMUNITY = "community"  # ученики всех тренеров его комьюнити
-RATING_SCOPE_GLOBAL = "global"        # все подтвержденные спортсмены с тренерами
+RATING_SCOPE_GLOBAL = "global"  # все подтвержденные спортсмены с тренерами
 
 
 async def _global_students(session: AsyncSession) -> list[User]:
@@ -166,9 +166,7 @@ async def _rating_students_for_scope(
 
     if scope == RATING_SCOPE_GLOBAL:
         ids = (
-            (
-                await session.execute(select(CoachStudent.student_id).distinct())
-            )
+            (await session.execute(select(CoachStudent.student_id).distinct()))
             .scalars()
             .all()
         )
@@ -450,28 +448,31 @@ async def ratings(message: Message, session: AsyncSession):
         await message.answer(text, parse_mode="HTML")
         return
 
-    # Соло-спортсмен видит только свою личную статистику и прогресс
+    # Соло-спортсмен видит ТОП-10 текстом (как гость) — общие рейтинги
+    # с фильтрами ему недоступны, но ориентироваться в топе он может.
     if user.is_solo:
-        await message.answer(
-            "🚀 <b>Вы в одиночном режиме</b>\n\n"
-            "Общий и клубный рейтинги доступны только спортсменам с тренером.\n"
-            "Ваша личная статистика и прогресс — в разделе «👤 Мой персонаж».",
-            parse_mode="HTML",
-        )
+        text = await build_rating_text(session, "exp", "all", "all", limit=10)
+        await message.answer(text, parse_mode="HTML")
         return
 
     # Сценарий В: главный тренер (по ТЕКУЩЕЙ роли в базе — в режиме
     # тестирования ученика он видит рейтинги как обычный пользователь)
     if user.role == "coach" and tg_id == CHIEF_COACH_ID:
-        students = await get_coach_students(session, user.id) or await _global_students(session)
+        students = await get_coach_students(session, user.id) or await _global_students(
+            session
+        )
         text = await build_rating_text(
             session, "exp", "all", "all", scope=RATING_SCOPE_MY, telegram_id=tg_id
         )
         await message.answer(
             text,
             reply_markup=build_rating_keyboard(
-                "exp", "all", "all", is_coach=True,
-                students_list=students, scope=RATING_SCOPE_MY,
+                "exp",
+                "all",
+                "all",
+                is_coach=True,
+                students_list=students,
+                scope=RATING_SCOPE_MY,
             ),
             parse_mode="HTML",
         )
@@ -479,18 +480,20 @@ async def ratings(message: Message, session: AsyncSession):
 
     # Сценарий Б: ученик или зритель — фильтры без кнопок профилей.
     # У ученика с тренером доступен переключатель области ТОПа.
-    has_coach = bool(
-        await session.execute(
-            select(CoachStudent).where(CoachStudent.student_id == user.id).limit(1)
-        ).scalar_one_or_none()
-    )
+    has_coach = (
+        await session.scalar(
+            select(CoachStudent.id).where(CoachStudent.student_id == user.id).limit(1)
+        )
+    ) is not None
     scope = RATING_SCOPE_MY if has_coach else None
     text = await build_rating_text(
         session, "exp", "all", "all", scope=scope, telegram_id=tg_id
     )
     await message.answer(
         text,
-        reply_markup=build_rating_keyboard("exp", "all", "all", is_coach=False, scope=scope),
+        reply_markup=build_rating_keyboard(
+            "exp", "all", "all", is_coach=False, scope=scope
+        ),
         parse_mode="HTML",
     )
 
@@ -548,7 +551,9 @@ async def rating_filters(callback: CallbackQuery, session: AsyncSession):
 
     students_list = None
     if is_coach:
-        students_list = await get_coach_students(session, user.id) or await _global_students(session)
+        students_list = await get_coach_students(
+            session, user.id
+        ) or await _global_students(session)
 
     text = await build_rating_text(
         session, sort, age, rank, scope=scope, telegram_id=tg_id
@@ -614,14 +619,22 @@ async def coach_rating_entry(message: Message, session: AsyncSession):
         return
     students = await get_coach_students(session, coach_id)
     text = await build_rating_text(
-        session, "exp", "all", "all", scope=RATING_SCOPE_MY,
+        session,
+        "exp",
+        "all",
+        "all",
+        scope=RATING_SCOPE_MY,
         telegram_id=message.from_user.id,
     )
     await message.answer(
         text,
         reply_markup=build_rating_keyboard(
-            "exp", "all", "all", is_coach=True,
-            students_list=students, scope=RATING_SCOPE_MY,
+            "exp",
+            "all",
+            "all",
+            is_coach=True,
+            students_list=students,
+            scope=RATING_SCOPE_MY,
         ),
         parse_mode="HTML",
     )
@@ -631,10 +644,12 @@ async def _best_training_points(session: AsyncSession, student_id: int) -> float
     """Лучший (максимальный) результат training_points спортсмена.
     Соло-тренировки (Workout.is_solo) в рейтинге очков не учитываются."""
     return await session.scalar(
-        select(func.max(WorkoutRegistration.training_points)).where(
+        select(func.max(WorkoutRegistration.training_points))
+        .where(
             WorkoutRegistration.student_id == student_id,
             Workout.is_solo.is_(False),
-        ).join(Workout, Workout.id == WorkoutRegistration.workout_id)
+        )
+        .join(Workout, Workout.id == WorkoutRegistration.workout_id)
     )
 
 
@@ -890,7 +905,6 @@ async def _combo_exp_map(
     return result
 
 
-
 def _workout_breakdown(
     pairs: list[tuple[TrickLog, Trick]],
     level_reqs: LevelExperience | None,
@@ -930,19 +944,25 @@ def _workout_breakdown(
         xp_ids = [] if log.combo_id else [log.id]
         kind = "step" if log.combo_id else "single"
         cid = log.combo_id if log.combo_id else None
-        results.append((log.calculated_points, log.calculated_xp, [log.id], xp_ids, kind, cid))
+        results.append(
+            (log.calculated_points, log.calculated_xp, [log.id], xp_ids, kind, cid)
+        )
     for cid, steps in combo_steps.items():
         steps.sort(key=lambda l: l.combo_step or 0)
         last = steps[-1]
         combo_points = last.calculated_points + (last.combo_bonus or 0.0)
         combo_xp = (combo_exp or {}).get(cid) or sum(s.calculated_xp for s in steps)
         # очки связки «сидят» на последнем шаге, опыт — на всех шагах
-        results.append((combo_points, combo_xp, [last.id], [s.id for s in steps], "combo", cid))
+        results.append(
+            (combo_points, combo_xp, [last.id], [s.id for s in steps], "combo", cid)
+        )
 
     # Зачет спорта: топ-8 результатов по очкам (шаги связок участвуют в очках)
-    step_sport_ids: set[int] = set()     # шаги/одиночные, зачётные СВОИМИ очками
-    combo_sport_ids: set[str] = set()    # combo_id, чей АГРЕГАТ в топ-8
-    for _p, _x, p_ids, _xp_ids, kind, cid in sorted(results, key=lambda r: r[0], reverse=True)[:8]:
+    step_sport_ids: set[int] = set()  # шаги/одиночные, зачётные СВОИМИ очками
+    combo_sport_ids: set[str] = set()  # combo_id, чей АГРЕГАТ в топ-8
+    for _p, _x, p_ids, _xp_ids, kind, cid in sorted(
+        results, key=lambda r: r[0], reverse=True
+    )[:8]:
         if kind == "combo":
             combo_sport_ids.add(cid)
         else:
@@ -952,9 +972,9 @@ def _workout_breakdown(
     # их опыт идет только через агрегат связки, они не должны занимать слоты.
     xp_ranking = [r for r in results if r[3]]
     in_game_ids: set[int] = set()
-    for _p, _x, _p_ids, xp_ids, _kind, _cid in sorted(xp_ranking, key=lambda r: r[1], reverse=True)[
-        :max_logs
-    ]:
+    for _p, _x, _p_ids, xp_ids, _kind, _cid in sorted(
+        xp_ranking, key=lambda r: r[1], reverse=True
+    )[:max_logs]:
         in_game_ids.update(xp_ids)
 
     notes: dict[int, str] = {}
