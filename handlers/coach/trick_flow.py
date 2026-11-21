@@ -31,6 +31,7 @@ from keyboards.coach_kb import (
     get_tricks_by_cat_kb,
     get_cones_input_kb,
 )
+
 from calculator import calculate_single_trick
 from handlers.coach.helpers import (
     parse_quantity_input,
@@ -426,8 +427,12 @@ async def _save_trick_log(
         ).scalar_one_or_none()
         if active_w:
             workout_id = active_w.id
-            await state.update_data(workout_id=workout_id, current_workout_id=workout_id)
+            await state.update_data(
+                workout_id=workout_id, current_workout_id=workout_id
+            )
         else:
+            from keyboards.skater_kb import get_student_main_menu
+
             await message.answer(
                 "❌ Активной тренировки нет — трюк записать некуда.\n"
                 "Попросите тренера открыть тренировку и подключитесь по PIN.",
