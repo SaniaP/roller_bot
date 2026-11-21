@@ -6,8 +6,9 @@ from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from models import User
+from models import User, CoachStudent
 from states.coach_states import CoachRegistrationStates
 from keyboards.coach_kb import get_cancel_keyboard
 from handlers.coach.helpers import get_coach_menu_for
@@ -74,11 +75,21 @@ async def coach_add_student_finish(
         is_approved=True,
     )
     session.add(new_student)
+    await session.flush()  # Получаем new_student.id до финального commit
+
+    coach = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
+
+    if coach:
+        session.add(CoachStudent(coach_id=coach.id, student_id=new_student.id))
+
     await session.commit()
     await state.clear()
+
     await message.answer(
         f"🎉 Профиль ученика успешно создан!",
-        reply_markup=await get_coach_menu_for(session),
+        reply_markup=await get_coach_menu_for(session, coach.id if coach else None),
     )
-
-

@@ -2,7 +2,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# запускать с корня : python -m scripts.delete_users
 """Скрипт каскадного удаления конкретных пользователей по ID.
 
 Удаляет пользователей и всё связанные с ними данные:
@@ -26,7 +26,7 @@ from database import async_session
 # ============================================
 # КОНФИГУРАЦИЯ
 # ============================================
-USER_IDS_TO_DELETE = [59]
+USER_IDS_TO_DELETE = [59,60,61]
 
 
 async def delete_users_cascade():
