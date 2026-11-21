@@ -62,17 +62,30 @@ async def get_coach_for_student(
 async def notify_coach_about_request(
     bot, coach: User, text: str, reply_markup, session: AsyncSession
 ) -> bool:
-    """Отправляет уведомление тренеру; если у тренера нет telegram_id —
-    отправляет главному тренеру (CHIEF_COACH_ID)."""
-    target = coach.telegram_id or CHIEF_COACH_ID
-    try:
-        await bot.send_message(
-            chat_id=target, text=text, reply_markup=reply_markup, parse_mode="HTML"
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Не удалось отправить уведомление тренеру {target}: {e}")
-        return False
+    """Отправляет уведомление тренеру; если у тренера нет telegram_id ИЛИ
+    отправка не удалась (бот заблокирован и т.п.) — отправляет главному
+    тренеру (CHIEF_COACH_ID). Причина ошибки пишется в лог."""
+    targets = []
+    if coach.telegram_id:
+        targets.append(coach.telegram_id)
+    if CHIEF_COACH_ID not in targets:
+        targets.append(CHIEF_COACH_ID)  # фолбэк: главный тренер всегда получит заявку
+
+    last_error = None
+    for target in targets:
+        try:
+            await bot.send_message(
+                chat_id=target, text=text, reply_markup=reply_markup, parse_mode="HTML"
+            )
+            return True
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Не удалось отправить уведомление тренеру {target}: {e!r}")
+
+    logger.error(
+        f"Уведомление о заявке не доставлено никому из {targets}: {last_error!r}"
+    )
+    return False
 
 
 logger = logging.getLogger(__name__)
@@ -351,12 +364,19 @@ async def guest_pick_coach(callback: CallbackQuery, session: AsyncSession):
     )
 
     await callback.answer(
-        "📨 Заявка отправлена тренеру!" if sent else "⚠️ Тренер недоступен."
+        "📨 Заявка отправлена тренеру!" if sent else "⚠️ Тренер недоступен.",
+        show_alert=not sent,
     )
-    await callback.message.edit_text(
-        "⏳ Ваша заявка отправлена тренеру на одобрение.\n"
-        "Как только тренер подтвердит профиль, вы сможете подключаться к тренировкам!"
-    )
+    if sent:
+        await callback.message.edit_text(
+            "⏳ Ваша заявка отправлена тренеру на одобрение.\n"
+            "Как только тренер подтвердит профиль, вы сможете подключаться к тренировкам!"
+        )
+    else:
+        await callback.message.edit_text(
+            "⚠️ Не удалось доставить заявку тренеру.\n"
+            "Попробуйте позже или напишите тренеру напрямую."
+        )
 
 
 @router.callback_query(F.data == CALLBACK_REG_ROLE_VIEWER)
