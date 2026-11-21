@@ -114,7 +114,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         # Проверяем, есть ли активная тренировка, чтобы показать кнопку «Продолжить»
         active_w = (
             await session.execute(
-                select(Workout).where(Workout.status == STATUS_ACTIVE)
+                select(Workout).where(Workout.status == STATUS_ACTIVE).limit(1)
             )
         ).scalar_one_or_none()
         await message.answer(
@@ -258,9 +258,10 @@ async def guest_pick_solo(callback: CallbackQuery, session: AsyncSession):
     await callback.answer("🚀 Добро пожаловать в одиночный режим!")
     await callback.message.answer(
         f"🚀 <b>{escape(new_user.full_name or '')}</b>, вы в одиночном режиме!\n\n"
-        "Вы тренируетесь самостоятельно: присоединяйтесь к тренировке по PIN-коду"
-        " и отправляйте трюки на проверку.",
-        reply_markup=get_student_main_menu(),
+        "Вы тренируетесь самостоятельно: трюки засчитываются сразу, "
+        "без судейства тренера.\n\n"
+        "▶️ Начните личную тренировку кнопкой ниже.",
+        reply_markup=get_student_main_menu(is_solo=True),
         parse_mode="HTML",
     )
 
@@ -852,7 +853,7 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         # Проверяем активную тренировку для правильного отображения меню тренера
         active_w = (
             await session.execute(
-                select(Workout).where(Workout.status == STATUS_ACTIVE)
+                select(Workout).where(Workout.status == STATUS_ACTIVE).limit(1)
             )
         ).scalar_one_or_none()
 

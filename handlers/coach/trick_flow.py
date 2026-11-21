@@ -23,7 +23,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import User, Trick, TrickLog, Workout, STATUS_ACTIVE
+from models import User, Trick, TrickLog, Workout, WorkoutRegistration, STATUS_ACTIVE
 from keyboards.coach_kb import (
     TrickAction,
     WorkoutAction,
@@ -414,7 +414,14 @@ async def _save_trick_log(
     if not workout_id:
         active_w = (
             await session.execute(
-                select(Workout).where(Workout.status == STATUS_ACTIVE)
+                select(Workout)
+                .join(WorkoutRegistration, WorkoutRegistration.workout_id == Workout.id)
+                .where(
+                    WorkoutRegistration.student_id == student_id,
+                    Workout.status == STATUS_ACTIVE,
+                )
+                .order_by(Workout.date.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         if active_w:

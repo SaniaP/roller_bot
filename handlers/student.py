@@ -42,6 +42,7 @@ from handlers.coach.stats import (
     build_student_profile_text,
     _workout_details_kb,
     send_profile_message,
+    fit_telegram_text,
 )
 from handlers.coach.helpers import get_trick_categories
 from handlers.coach.handbook import _handbook_categories_kb
@@ -95,7 +96,7 @@ async def student_ask_for_pin(
 
 
 @router.message(StudentStates.waiting_for_pin, F.text == "❌ Отмена войти")
-async def cancel_pin_input(message: Message, state: FSMContext):
+async def cancel_pin_input(message: Message, state: FSMContext, session: AsyncSession):
     await state.clear()
     user = (
         await session.execute(
@@ -103,7 +104,8 @@ async def cancel_pin_input(message: Message, state: FSMContext):
         )
     ).scalar_one_or_none()
     await message.answer(
-        "Вход отменен.", reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo))
+        "Вход отменен.",
+        reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo)),
     )
 
 
@@ -130,31 +132,31 @@ async def solo_start_workout(
 
     # Уже есть активная личная тренировка — продолжаем её
     active_w = (
-        await session.execute(
-            select(Workout).where(
-                Workout.status == STATUS_ACTIVE,
-                Workout.is_solo.is_(True),
+        (
+            await session.execute(
+                select(Workout).where(
+                    Workout.status == STATUS_ACTIVE,
+                    Workout.is_solo.is_(True),
+                )
             )
         )
-    ).scalars().all()
-    solo_active = next(
+        .scalars()
+        .all()
+    )
+    regs = (
         (
-            w
-            for w in active_w
-            if any(
-                r.student_id == user.id
-                for r in (
-                    await session.execute(
-                        select(WorkoutRegistration).where(
-                            WorkoutRegistration.workout_id == w.id,
-                            WorkoutRegistration.student_id == user.id,
-                        )
-                    )
+            await session.execute(
+                select(WorkoutRegistration).where(
+                    WorkoutRegistration.student_id == user.id
                 )
-                .scalars()
-                .all()
             )
-        ),
+        )
+        .scalars()
+        .all()
+    )
+    my_workout_ids = {r.workout_id for r in regs}
+    solo_active = next(
+        (w for w in active_w if w.id in my_workout_ids),
         None,
     )
 
@@ -169,9 +171,7 @@ async def solo_start_workout(
         )
         session.add(workout)
         await session.flush()
-        session.add(
-            WorkoutRegistration(workout_id=workout.id, student_id=user.id)
-        )
+        session.add(WorkoutRegistration(workout_id=workout.id, student_id=user.id))
         await session.commit()
         await message.answer(
             f"🚀 <b>Личная тренировка №{workout.id} начата!</b>\n\n"
@@ -204,10 +204,18 @@ async def solo_finish_workout(
     workout_id = data.get("current_workout_id")
 
     workout = await session.get(Workout, workout_id) if workout_id else None
+    if not user or not user.is_solo:
+        # Обычную (тренерскую) тренировку завершает только тренер
+        await message.answer(
+            "⛔ Завершить тренировку может только соло-спортсмен на своей "
+            "личной тренировке. Тренерскую тренировку закрывает тренер.",
+            reply_markup=get_student_training_menu(),
+        )
+        return
     if not workout or not workout.is_solo:
         await message.answer(
             "❌ Активной личной тренировки не найдено.",
-            reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo)),
+            reply_markup=get_student_main_menu(is_solo=True),
         )
         await state.clear()
         return
@@ -234,16 +242,14 @@ async def solo_finish_workout(
     )
 
     final_points, final_xp = await calculate_current_workout_totals(
-        logs, user, session
+        list(logs), user, session
     )
     if reg:
         reg.training_points = final_points
         reg.training_xp = final_xp
     user.xp += final_xp
 
-    new_level, level_upgraded = await check_level_up(
-        user.level, user.xp, session
-    )
+    new_level, level_upgraded = await check_level_up(user.level, user.xp, session)
     lvl_text = ""
     if level_upgraded:
         user.level = new_level
@@ -255,6 +261,8 @@ async def solo_finish_workout(
     await session.commit()
     await state.clear()
 
+    # Детальный отчет — та же разбивка, что в журнале тренировок тренера
+    # (сначала сообщение с итогом, затем полная детализация)
     await message.answer(
         f"🏁 <b>Личная тренировка завершена!</b>\n\n"
         f"🛹 Итог: {final_points:.1f} очков, +{final_xp} EXP{lvl_text}\n"
@@ -262,6 +270,35 @@ async def solo_finish_workout(
         reply_markup=get_student_main_menu(is_solo=True),
         parse_mode="HTML",
     )
+
+    if logs:
+        from handlers.coach.stats import _combo_exp_map, build_workout_log_text
+        from models import LevelExperience
+
+        logs_pairs = [(log, None) for log in logs]
+        trick_map = {
+            t.id: t
+            for t in (
+                await session.scalars(
+                    select(Trick).where(
+                        Trick.id.in_([l.trick_id for l, _t in logs_pairs])
+                    )
+                )
+            ).all()
+        }
+        pairs = [(log, trick_map.get(log.trick_id)) for log, _t in logs_pairs]
+        combo_exp = await _combo_exp_map(
+            [(log, t) for log, t in pairs if log.combo_id], user, session
+        )
+        level_reqs = await session.get(LevelExperience, user.level)
+        detail = build_workout_log_text(
+            workout, reg, user, pairs, level_reqs, combo_exp
+        )
+        lvl_note = f"\n🔥 Уровень повышен на этой тренировке!" if level_upgraded else ""
+        await message.answer(
+            fit_telegram_text(detail + lvl_note),
+            parse_mode="HTML",
+        )
 
 
 @router.message(StudentStates.waiting_for_pin)
@@ -379,13 +416,28 @@ async def show_categories_dynamic(
         return
 
     workout_id = data.get("current_workout_id") or 0
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+    ).scalar_one_or_none()
     if not workout_id:
         # FSM мог быть сброшен (например, тренер закрыл тренировку, а студент
         # продолжил ввод) — привязываемся к текущей активной тренировке,
         # иначе логи уйдут с workout_id=0 и пропадут из зачета
+        if not user:
+            await message.answer("❌ Профиль не найден.")
+            return
         active_w = (
             await session.execute(
-                select(Workout).where(Workout.status == STATUS_ACTIVE)
+                select(Workout)
+                .join(WorkoutRegistration, WorkoutRegistration.workout_id == Workout.id)
+                .where(
+                    WorkoutRegistration.student_id == user.id,
+                    Workout.status == STATUS_ACTIVE,
+                )
+                .order_by(Workout.date.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         if active_w:
@@ -399,11 +451,6 @@ async def show_categories_dynamic(
             )
             await state.clear()
             return
-    user = (
-        await session.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-    ).scalar_one_or_none()
     if not user:
         await message.answer("❌ Профиль не найден.")
         return
@@ -442,9 +489,18 @@ async def student_start_combo(
         await message.answer("❌ Профиль не найден.")
         return
 
-    # Ищем активную тренировку ученика
+    # Ищем активную тренировку ученика (через записи на тренировку)
     workout = (
-        await session.execute(select(Workout).where(Workout.status == STATUS_ACTIVE))
+        await session.execute(
+            select(Workout)
+            .join(WorkoutRegistration, WorkoutRegistration.workout_id == Workout.id)
+            .where(
+                WorkoutRegistration.student_id == user.id,
+                Workout.status == STATUS_ACTIVE,
+            )
+            .order_by(Workout.date.desc())
+            .limit(1)
+        )
     ).scalar_one_or_none()
     if not workout:
         await message.answer("❌ Нет активной тренировки.")
@@ -487,29 +543,55 @@ async def student_start_combo(
 async def student_today_stats(
     message: Message, state: FSMContext, session: AsyncSession
 ):
-    """Перечень отправленных тренеру трюков и связок со статусом
-    (на проверке / подтвержден) + ожидаемые итоги тренировки."""
+    """Разбивка тренировки — та же, что в журнале тренировок тренера
+    (build_workout_log_text): шапка с живым пересчетом, зачет, штрафы,
+    связки блоками и одиночные трюки."""
+    from handlers.coach.stats import _combo_exp_map, build_workout_log_text
+    from models import LevelExperience
+
     user = (
         await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
     ).scalar_one_or_none()
+    if not user:
+        await message.answer("❌ Профиль не найден.")
+        return
 
-    # Ищем активную тренировку
-    workout_query = select(Workout).where(Workout.status == STATUS_ACTIVE)
+    # Ищем активную тренировку ученика (через записи на тренировку)
+    workout_query = (
+        select(Workout)
+        .join(WorkoutRegistration, WorkoutRegistration.workout_id == Workout.id)
+        .where(
+            WorkoutRegistration.student_id == user.id,
+            Workout.status == STATUS_ACTIVE,
+        )
+        .order_by(Workout.date.desc())
+        .limit(1)
+    )
     active_workout = (await session.execute(workout_query)).scalar_one_or_none()
 
     if not active_workout:
         await message.answer("Тренировка уже завершена.")
         return
 
-    data = await state.get_data()
-    cone_line = data.get("cone_line", DEFAULT_CONE_LINE)
+    reg = (
+        await session.execute(
+            select(WorkoutRegistration).where(
+                WorkoutRegistration.workout_id == active_workout.id,
+                WorkoutRegistration.student_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not reg:
+        await message.answer("❌ Регистрация на тренировку не найдена.")
+        return
 
     logs = (
         (
             await session.execute(
                 select(TrickLog)
+                .join(Trick, Trick.id == TrickLog.trick_id)
                 .where(
                     TrickLog.workout_id == active_workout.id,
                     TrickLog.student_id == user.id,
@@ -528,10 +610,7 @@ async def student_today_stats(
         )
         return
 
-    # Группируем: связки одним элементом, одиночные трюки — по одному
-    from handlers.coach.review import _group_logs_by_combo
-
-    tricks = {
+    trick_map = {
         t.id: t
         for t in (
             await session.scalars(
@@ -540,136 +619,30 @@ async def student_today_stats(
         ).all()
     }
 
-    # Стоимость связки = Result последнего шага; EXP — по формуле калькулятора
-    from handlers.coach.stats import _combo_exp_map
-
-    pairs = [(log, tricks.get(log.trick_id)) for log in logs if log.combo_id]
-    combo_exp = await _combo_exp_map(pairs, user, session)
-
-    items = _group_logs_by_combo(list(logs))
-    lines = ["📊 Мои очки за сегодня:\n"]
-    for item in items:
-        if item["type"] == "combo":
-            steps = item["logs"]
-            names = " → ".join(
-                tricks.get(s.trick_id).name if tricks.get(s.trick_id) else "?"
-                for s in steps
-            )
-            confirmed = all(not s.needs_review for s in steps)
-            status = "✅ подтверждена" if confirmed else "⏳ на проверке"
-            # Стоимость связки = Result последнего шага, EXP = сумма шагов
-            last = max(steps, key=lambda s: s.combo_step or 0)
-            combo_points = last.calculated_points + (last.combo_bonus or 0.0)
-            combo_xp = combo_exp.get(last.combo_id, 0)
-            lines.append(
-                f"🧩 Связка: {names} — "
-                f"{round(combo_points, 2)} очков, +{combo_xp} EXP — {status}"
-            )
-        else:
-            log = item["log"]
-            trick = tricks.get(log.trick_id)
-            name = trick.name if trick else "Трюк"
-            status = "✅ подтвержден" if not log.needs_review else "⏳ на проверке"
-            # Поправка качества, внесенная тренером при подтверждении
-            mult = log.execution_multiplier or 1.0
-            if mult < 1.0:
-                accuracy = f" • (-{(1.0 - mult) * 100:.0f}%)"
-            elif mult > 1.0:
-                accuracy = f" • кач. {mult:.2f}"
-            else:
-                accuracy = ""
-            lines.append(
-                f"🎯 {name}: {log.quantity} конусов, (дорожка {log.cone_line}){accuracy} — "
-                f"{log.calculated_points} очков, +{log.calculated_xp} EXP — {status}"
-            )
-
-    # Итог по подтвержденным: как в журнале тренировок (калькулятор итогов)
-    from calculator import calculate_current_workout_totals
-    from models import LevelExperience
-
-    student = await session.get(User, user.id)
-    level_reqs = await session.get(LevelExperience, student.level)
-    sport_score, total_xp = await calculate_current_workout_totals(
-        list(logs), student, session
+    pairs = [(log, trick_map.get(log.trick_id)) for log in logs]
+    combo_exp = await _combo_exp_map(
+        [(log, t) for log, t in pairs if log.combo_id], user, session
     )
-    pending = [l for l in logs if l.needs_review]
-    # Шапка как в журнале тренировок: только для активной тренировки,
-    # для завершенной — прежний формат
-    from models import STATUS_ACTIVE as _SA
+    level_reqs = await session.get(LevelExperience, user.level)
 
-    if pending:
-        lines.append(
-            f"\n⏳ На проверке: {len(pending)} — очки засчитаются после подтверждения тренером."
-        )
-    else:
-        lines.append("\n✅ Все отправленные трюки подтверждены тренером.")
-
-    if active_workout.status == _SA:
-        # Живая шапка: база = сумма лучших 8 / 8, штраф = 3.0 за недостающую категорию,
-        # опыт = сумма лучших 5 трюков/связок по EXP
-        sport_results: list[float] = []
-        xp_results: list[int] = []
-        combo_steps: dict[str, list] = {}
-        for log in logs:
-            if log.combo_id:
-                combo_steps.setdefault(log.combo_id, []).append(log)
-            else:
-                sport_results.append(log.calculated_points)
-                xp_results.append(log.calculated_xp)
-        for cid, steps in combo_steps.items():
-            steps.sort(key=lambda l: l.combo_step or 0)
-            last = steps[-1]
-            combo_points = last.calculated_points + (last.combo_bonus or 0.0)
-            combo_xp = combo_exp.get(cid, 0)
-            # Как в журнале/калькуляторе: КАЖДЫЙ шаг связки independently
-            # участвует в топ-8 по очкам, плюс итог связки как отдельная запись;
-            # в опыте шаги не участвуют лично — только агрегат связки.
-            for s in steps:
-                sport_results.append(s.calculated_points)
-            sport_results.append(combo_points)
-            xp_results.append(combo_xp)
-
-        sport_results.sort(reverse=True)
-        base_points = sum(sport_results[:8]) / 8.0
-        penalty = 0.0
-        if level_reqs:
-            categories_count = len({t.category for t in tricks.values() if t})
-            missing = max(0, level_reqs.min_trick_categories - categories_count)
-            penalty = missing * 3.0
-        live_score = round(base_points - penalty, 2)
-
-        xp_results.sort(reverse=True)
-        live_xp = sum(xp_results[: (level_reqs.max_workout_logs if level_reqs else 10)])
-
-        max_logs = level_reqs.max_workout_logs if level_reqs else 10
-        min_categories = level_reqs.min_trick_categories if level_reqs else 3
-        if not level_reqs:
-            categories_count = len({t.category for t in tricks.values() if t})
-
-        def _chk(done, total):
-            return "✅" if done >= total else "⚠️"
-
-        lines.append("📊 Предварительно:")
-        pts_line = f"🏅 {live_score:.2f}"
-        if penalty:
-            pts_line += f" (- штраф {penalty:.1f})"
-        lines.append(
-            f"{pts_line} | ✨ +{live_xp} EXP\n"
-            f"Зачет: ✨ {min(len(xp_results), max_logs)}/{max_logs} {_chk(len(xp_results), max_logs)} • "
-            f"🏅 {min(len(sport_results), 8)}/8 {_chk(len(sport_results), 8)} • "
-            f"Категории: {categories_count}/{min_categories} {_chk(categories_count, min_categories)}"
-        )
-    else:
-        lines.append(f"📊 Итог тренировки: {sport_score} очков, +{total_xp} EXP")
-
+    # Тот же текст, что тренер видит в журнале тренировок
+    text = build_workout_log_text(
+        active_workout, reg, user, pairs, level_reqs, combo_exp
+    )
     await message.answer(
-        "\n".join(lines),
+        text,
         reply_markup=get_student_training_menu(),
+        parse_mode="HTML",
     )
 
 
-@router.message(StudentStates.training_active, F.text == "🚪 Покинуть тренировку")
-async def student_leave_workout(message: Message, state: FSMContext, session: AsyncSession):
+@router.message(
+    StudentStates.training_active,
+    F.text.in_({"⬅️ Назад", "🚪 Покинуть тренировку"}),
+)
+async def student_leave_workout(
+    message: Message, state: FSMContext, session: AsyncSession
+):
     """Сбрасывает состояние и возвращает ученика в главное меню"""
     await state.clear()
     user = (
@@ -678,7 +651,8 @@ async def student_leave_workout(message: Message, state: FSMContext, session: As
         )
     ).scalar_one_or_none()
     await message.answer(
-        "🚪 Вы поехали отдыхать. Тренировка покинута!",
+        "⬅️ Вы вернулись в главное меню. Тренировка продолжается — "
+        "подключитесь к ней снова по PIN-коду или начните личную.",
         reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo)),
     )
 

@@ -41,14 +41,18 @@ def get_student_main_menu(is_solo: bool = False) -> ReplyKeyboardMarkup:
 get_solo_main_menu = get_student_main_menu
 
 
-def get_student_training_menu() -> ReplyKeyboardMarkup:
-    """Меню ученика во время активной тренировки на споте"""
+def get_student_training_menu(is_solo: bool = False) -> ReplyKeyboardMarkup:
+    """Меню ученика во время активной тренировки на споте.
+    У соло-спортсмена — завершение личной тренировки и возврат назад."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛼 Отправить выполненный трюк")],
             [KeyboardButton(text="🧩 Отправить связку")],
             [KeyboardButton(text="📊 Мои очки за сегодня")],
-            [KeyboardButton(text="🚪 Покинуть тренировку")],
+            [
+                KeyboardButton(text="🏁 Завершить тренировку"),
+                KeyboardButton(text="⬅️ Назад"),
+            ],
         ],
         resize_keyboard=True,
     )

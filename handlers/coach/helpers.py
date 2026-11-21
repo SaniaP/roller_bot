@@ -38,7 +38,7 @@ async def get_active_workout(
         stmt = stmt.where(Workout.coach_id == coach_id)
     else:
         stmt = stmt.where(Workout.is_solo.is_(True))
-    return (await session.execute(stmt)).scalar_one_or_none()
+    return (await session.execute(stmt.limit(1))).scalar_one_or_none()
 
 
 async def get_coach_menu_for(session: AsyncSession, coach_id: int):
