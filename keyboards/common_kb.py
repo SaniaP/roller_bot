@@ -95,3 +95,21 @@ def get_request_registration_kb() -> InlineKeyboardMarkup:
             ]
         ]
     )
+def get_help_kb() -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура для команды /help: контакты создателя проекта."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✉️ Написать в Telegram",
+                    url="https://t.me/Alexarender",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📸 Instagram (@sania87oo)",
+                    url="https://instagram.com/sania87oo",
+                )
+            ],
+        ]
+    )

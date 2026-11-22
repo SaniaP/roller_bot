@@ -17,6 +17,7 @@ from config import CHIEF_COACH_ID
 from keyboards import get_coach_main_menu_sync
 from keyboards.coach_kb import get_approve_user_kb
 from keyboards.skater_kb import get_student_main_menu
+from keyboards.common_kb import get_help_kb
 from states.workout_states import StudentWorkoutStates, CoachWorkoutStates
 from states.skater_states import (
     SkaterRegistrationStates,
@@ -91,6 +92,22 @@ async def notify_coach_about_request(
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    """Хэндлер команды /help: поддержка, контакты и подключение школ."""
+    await message.answer(
+        "🆘 <b>Поддержка и контакты Roller Heroes</b>\n\n"
+        "Привет! Я Александр — тренер и создатель этого проекта.\n\n"
+        "📩 <b>Пиши мне напрямую, если:</b>\n"
+        "• Хочешь подключить к боту свою <b>роллер-школу, клуб или сообщество</b> "
+        "и получить права тренера.\n"
+        "• Нашёл баг, заметил неточность в расчётах или есть идея по улучшению продукта.\n\n"
+        "👇 <b>Выбери удобный способ связи:</b>",
+        reply_markup=get_help_kb(),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("start"))

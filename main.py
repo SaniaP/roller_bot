@@ -6,6 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 from config import BOT_TOKEN as TOKEN
 # Подключаем нашего созданного охранника из папки middlewares
@@ -100,6 +101,13 @@ async def main():
     print("🚀 Бот роллер-школы успешно запущен и готов к работе!")
 
     # Запуск бота (пропускаем накопленные апдейты при выключенном состоянии)
+    # Меню команд в синей кнопке Telegram
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Главное меню и личный кабинет"),
+            BotCommand(command="help", description="Помощь, контакты и подключение школ"),
+        ]
+    )
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
