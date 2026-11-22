@@ -2,6 +2,7 @@
 
 import logging
 from datetime import date, datetime
+from html import escape
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -309,7 +310,7 @@ async def build_rating_text(
     students = (await session.execute(query)).scalars().all()
 
     if not students:
-        return "📈 <b>Рейтинг учеников</b>\n\nПока никого нет по выбранным фильтрам."
+        return "📈 <b>Рейтинг спортсменов</b>\n\nПока никого нет по выбранным фильтрам."
 
     # Для сортировки по очкам пересортировываем средствами Python по BP
     if sort == "score":
@@ -320,8 +321,8 @@ async def build_rating_text(
         students = [st for st, _bp in scored]
 
     titles = {
-        "exp": "сортировка по EXP",
-        "score": "сортировка по очкам",
+        "exp": "по опыту",
+        "score": "по очкам",
     }
     scope_titles = {
         RATING_SCOPE_MY: "👤 мой ТОП",
@@ -329,7 +330,7 @@ async def build_rating_text(
         RATING_SCOPE_GLOBAL: "🌍 общий рейтинг",
     }
     scope_part = f" • {scope_titles[scope]}" if scope in scope_titles else ""
-    lines = [f"📈 <b>Рейтинг учеников</b> ({titles.get(sort, sort)}{scope_part})\n"]
+    lines = [f"📈 <b>Рейтинг спортсменов</b> ({titles.get(sort, sort)}{scope_part})\n"]
 
     for i, st in enumerate(students, start=1):
         best_points = await _best_training_points(session, st.id)
@@ -342,8 +343,13 @@ async def build_rating_text(
             bar = draw_progress_bar(percent)
         else:
             bar = "🏆 Максимальный уровень достигнут!"
+        safe_name = escape(st.full_name or "Спортсмен")
+        lines.append(f"{i}. 👤 <b>{safe_name}</b> - {st.level} LVL, BS : {bp}\n{bar}")
+
+    if limit:
         lines.append(
-            f"{i}. 👤 <b>{st.full_name}</b> - {st.level} LVL, BS : {bp}\n" f"{bar}"
+            f"\n🔒 <i>Гостям доступна только первая {limit}-ка. "
+            "Зарегистрируйся, чтобы открыть полный рейтинг принять участие!</i>"
         )
 
     return "\n".join(lines)

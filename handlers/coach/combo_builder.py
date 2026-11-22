@@ -24,7 +24,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from models import User, Trick, TrickLog, Workout
+from models import User, Trick, TrickLog, Workout, XpPenalty
 from states.coach_states import ComboBuilderStates
 from states import StudentStates
 from keyboards.coach_kb import TrickAction, ComboAction
@@ -34,6 +34,55 @@ from handlers.track_state import DEFAULT_CONE_LINE, cone_line_text, track_row_ma
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+async def _combo_total_xp(
+    items: list[dict],
+    combo_points: float,
+    student: User,
+    session: AsyncSession,
+) -> int:
+    """EXP связки по формуле из stats.py (_combo_exp_map / calculator.py):
+      xp = combo_points * base_ratio * avg_quantity * 1.4 * length_bonus
+         * штраф_за_уровень, где
+      base_ratio   = Σ(trick.base_xp) / Σ(trick.base_tech_points) по шагам,
+      avg_quantity = среднее количество конусов,
+      length_bonus = 1.0 + 0.15 * (число_шагов - 1).
+    Шаги НЕ суммируются своим персональным XP (это давало завышенный опыт)."""
+    if not items:
+        return 0
+
+    sum_base_xp = 0
+    sum_base_tech = 0
+    for it in items:
+        trick = await session.get(Trick, it["trick_id"])
+        if trick:
+            sum_base_xp += trick.base_xp
+            sum_base_tech += trick.base_tech_points
+        else:
+            sum_base_xp += 0
+            sum_base_tech += 0
+
+    base_ratio = sum_base_xp / sum_base_tech if sum_base_tech else 1.0
+    avg_quantity = sum(it["quantity"] for it in items) / len(items)
+    length_bonus = 1.0 + 0.15 * max(0, len(items) - 1)
+    raw_xp = combo_points * base_ratio * avg_quantity * 1.4 * length_bonus
+
+    # Штраф за уровень по последнему шагу связки (как в stats.py)
+    xp_multiplier = 1.0
+    last_trick = await session.get(Trick, items[-1]["trick_id"])
+    if last_trick is not None:
+        level_diff = student.level - last_trick.trick_tier
+        if level_diff > 9:
+            xp_multiplier = 0.01
+        elif level_diff > 0:
+            penalty = await session.scalar(
+                select(XpPenalty).where(XpPenalty.level_difference == level_diff)
+            )
+            if penalty:
+                xp_multiplier = penalty.xp_multiplier
+
+    return max(0, int(raw_xp * xp_multiplier))
 
 
 async def _restore_menu_after_combo(
@@ -69,7 +118,8 @@ async def _restore_menu_after_combo(
         if items:
             last = items[-1]
             combo_points = last["points"] + last.get("bonus", 0.0)
-            combo_xp = data.get("combo_total_xp", 0)
+            # XP связки по формуле stats.py, а не сумма XP шагов
+            combo_xp = await _combo_total_xp(items, combo_points, saver, session)
 
         # Сброс и настройка состояний ученика
         await state.clear()
@@ -79,15 +129,24 @@ async def _restore_menu_after_combo(
             cone_line=data.get("cone_line"),
         )
 
-        msg_text = (
-            "↩️ Действие отменено."
-            if cancelled
-            else "🧩 Связка отправлена тренеру на проверку!\n\n"
-            f"📊 **Ожидаемое начисление:**\n"
-            f"• Баллы: +{round(combo_points, 2)}\n"
-            f"• Опыт: +{combo_xp} EXP\n\n"
-            "⏳ Очки и EXP засчитаются после подтверждения тренером."
-        )
+        if cancelled:
+            msg_text = "↩️ Действие отменено."
+        elif saver.is_solo:
+            # Соло-спортсмен: связка засчитывается сразу, без подтверждения тренера
+            msg_text = (
+                "🧩 Связка засчитана!\n\n"
+                f"📊 <b>Начислено:</b>\n"
+                f"• Баллы: +{round(combo_points, 2)}\n"
+                f"• Опыт: +{combo_xp} EXP"
+            )
+        else:
+            msg_text = (
+                "🧩 Связка отправлена тренеру на проверку!\n\n"
+                f"📊 **Ожидаемое начисление:**\n"
+                f"• Баллы: +{round(combo_points, 2)}\n"
+                f"• Опыт: +{combo_xp} EXP\n\n"
+                "⏳ Очки и EXP засчитаются после подтверждения тренером."
+            )
 
         # === ПРОЖИГАЕМ / УДАЛЯЕМ СТАРЫЙ КОНСТРУКТОР Д для ученика
         if isinstance(message_or_callback, CallbackQuery):

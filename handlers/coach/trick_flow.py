@@ -491,8 +491,8 @@ async def _save_trick_log(
             await message.answer(
                 f"✅ Трюк <b>{trick.name}</b> засчитан!\n\n"
                 f"📏 Дорожка: {cone_line} см\n"
-                f"🪚 Пройдено конусов: {quantity} шт.\n\n"
-                f"✨ **Начислено сразу:** +{calc_points} баллов | +{calc_xp} EXP",
+                f"🔢 Пройдено конусов: {quantity} шт.\n\n"
+                f"✨ <b>Начислено:</b> +{calc_points} баллов | +{calc_xp} EXP",
                 reply_markup=_student_training_menu(solo_mode),
                 parse_mode="HTML",
             )
@@ -501,7 +501,7 @@ async def _save_trick_log(
                 f"✨ Трюк отправлен на проверку тренеру!\n\n"
                 f"🛹 Трюк: {trick.name}\n"
                 f"📏 Дорожка: {cone_line} см\n"
-                f"🪚 Пройдено конусов: {quantity} шт.\n\n"
+                f"🔢 Пройдено конусов: {quantity} шт.\n\n"
                 f"📊 **Ожидаемое начисление:**\n"
                 f"• Баллы: +{calc_points}\n"
                 f"• Опыт: +{calc_xp} EXP\n\n"
@@ -518,7 +518,7 @@ async def _save_trick_log(
             f"• Количество конусов: <code>{quantity}</code>\n"
             f"• Точность выполнения: <code>{accuracy_text}</code> "
             f"(коэфф. {execution_multiplier:.2f})\n\n"
-            f"✨ **Начислено:** +{calc_points} баллов | +{calc_xp} EXP",
+            f"✨ <b>Начислено:</b> +{calc_points} баллов | +{calc_xp} EXP",
             reply_markup=_coach_after_save_kb(workout_id, student_id),
             parse_mode="HTML",
         )
