@@ -193,7 +193,7 @@ async def show_skater_card_or_main_list(
     if not student_id:
         current_students = await get_workout_students(session, workout_id)
         await callback.message.edit_text(
-            "🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\nСписок спортсменов на занятии:",
+            "🏋️‍♂️ <b>ИДЕТ ТРЕНИРОВКА</b>\n\nСписок спортсменов на занятии:",
             reply_markup=get_active_workout_kb(workout_id, current_students),
         )
         return

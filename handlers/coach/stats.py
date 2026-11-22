@@ -1154,11 +1154,15 @@ async def _workout_details_kb(
     return builder.as_markup()
 
 
+TELEGRAM_CAPTION_LIMIT = 1024
+
+
 async def _edit_profile_message(message: Message, text: str, reply_markup):
     """Редактирует сообщение профиля: у фото-сообщения меняем caption, у текстового — text."""
     if message.photo:
+        caption = fit_telegram_text(text, TELEGRAM_CAPTION_LIMIT)
         await message.edit_caption(
-            caption=text, reply_markup=reply_markup, parse_mode="HTML"
+            caption=caption, reply_markup=reply_markup, parse_mode="HTML"
         )
     else:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
