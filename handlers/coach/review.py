@@ -17,7 +17,7 @@ from keyboards.coach_kb import (
     ReviewAction,
 )
 from calculator import calculate_single_trick
-from handlers.coach.helpers import get_coach_menu_for, percentage_to_multiplier
+from handlers.coach.helpers import get_coach_menu_for, get_coach_menu_for_tg, percentage_to_multiplier
 
 router = Router()
 
@@ -478,7 +478,7 @@ async def review_process_multiplier(
     if not anchor_log or not anchor_log.needs_review:
         await message.answer(
             "⚠️ Этот трюк уже подтвержден.",
-            reply_markup=await get_coach_menu_for(session),
+            reply_markup=await get_coach_menu_for_tg(session, message.from_user.id),
         )
         return
 

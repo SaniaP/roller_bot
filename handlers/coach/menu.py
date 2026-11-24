@@ -11,7 +11,7 @@ from sqlalchemy import select
 from models import User, CoachStudent
 from states.coach_states import CoachRegistrationStates
 from keyboards.coach_kb import get_cancel_keyboard
-from handlers.coach.helpers import get_coach_menu_for
+from handlers.coach.helpers import get_coach_menu_for, get_coach_menu_for_tg
 
 router = Router()
 
@@ -26,7 +26,7 @@ async def cmd_cancel(message: Message, state: FSMContext, session: AsyncSession)
     await state.clear()
     await message.answer(
         "❌ Действие отменено. Возвращаю вас в главное меню.",
-        reply_markup=await get_coach_menu_for(session),
+        reply_markup=await get_coach_menu_for_tg(session, message.from_user.id),
     )
 
 
