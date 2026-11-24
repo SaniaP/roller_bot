@@ -89,8 +89,22 @@ async def _coach_id_by_tg(session: AsyncSession, telegram_id: int) -> int | None
     user = (
         await session.execute(select(User).where(User.telegram_id == telegram_id))
     ).scalar_one_or_none()
-    if user and user.role == "coach":
+    if not user:
+        return None
+    if user.role == "coach":
         return user.id
+    # Зритель: смотрим за студентом — берем тренера этого студента.
+    if user.role == "viewer" and user.viewer_for_id:
+        return await session.scalar(
+            select(CoachStudent.coach_id).where(
+                CoachStudent.student_id == user.viewer_for_id
+            )
+        )
+    # Студент: берем его тренера из привязки CoachStudent.
+    if user.role == "student":
+        return await session.scalar(
+            select(CoachStudent.coach_id).where(CoachStudent.student_id == user.id)
+        )
     return None
 
 
@@ -492,9 +506,13 @@ async def ratings(message: Message, session: AsyncSession):
     # У одобренного пользователя доступен переключатель области ТОПа
     # (Группа/Клуб/Общий): у ученика с тренером — полная логика scope,
     # у остальных — клуб/общий через их же обработчики.
+    # Для зрителя проверяем привязку его подопечного студента, а не самого зрителя
+    student_id = user.viewer_for_id if user.role == "viewer" else user.id
     has_coach = (
         await session.scalar(
-            select(CoachStudent.id).where(CoachStudent.student_id == user.id).limit(1)
+            select(CoachStudent.id)
+            .where(CoachStudent.student_id == student_id)
+            .limit(1)
         )
     ) is not None
     scope = RATING_SCOPE_MY if has_coach else RATING_SCOPE_GLOBAL
@@ -548,12 +566,18 @@ async def rating_filters(callback: CallbackQuery, session: AsyncSession):
         )
         return
     else:
+        # Для зрителя проверяем привязку его подопечного студента
+        student_id = (
+            user.viewer_for_id
+            if user and user.role == "viewer"
+            else (user.id if user else None)
+        )
         has_coach = bool(
-            user
+            student_id
             and (
                 await session.execute(
                     select(CoachStudent)
-                    .where(CoachStudent.student_id == user.id)
+                    .where(CoachStudent.student_id == student_id)
                     .limit(1)
                 )
             ).scalar_one_or_none()

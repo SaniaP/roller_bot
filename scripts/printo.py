@@ -64,6 +64,10 @@ async def print_any_table(table_name: str, filter_column: str = None, filter_val
             print("📭 Записей не найдено.")
             return
 
+        # Оставляем только последние 200 записей
+        if len(rows) > 200:
+            rows = rows[-200:]
+
         # Динамически рассчитываем ширину колонок
         col_widths = {col: len(col) for col in columns}
         prepared_rows = []

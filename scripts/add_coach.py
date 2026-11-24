@@ -24,8 +24,8 @@ from models import Community, CommunityCoach, User
 # ============================================
 # КОНФИГУРАЦИЯ
 # ============================================
-USER_IDS_TO_ADD = []  # id пользователей из таблицы users или пусто если юзер новый
-COMMUNITY_NAME = "Банда Anastacia"  # имя комьюнити (создаётся, если его нет)
+USER_IDS_TO_ADD = [73]  # id пользователей из таблицы users или пусто если юзер новый
+COMMUNITY_NAME = "Inmove"  # имя комьюнити (создаётся, если его нет)
 
 # Создавать пользователя, если его нет в базе?
 CREATE_IF_MISSING = True
@@ -33,7 +33,7 @@ CREATE_IF_MISSING = True
 # Данные для создания новых пользователей (используются, если CREATE_IF_MISSING=True).
 # Каждый пользователь создаётся со статусом coach и сразу добавляется в комьюнити.
 NEW_USERS_DATA = [
-    {"telegram_id": 506447144, "full_name": "Anastacia", "phone": +375447276669},
+    #{"telegram_id": 949090583, "full_name": "Anastacia", "phone": +375447276669},
     # {"telegram_id": 987654321, "full_name": "Пётр Петров", "phone": "+79001234567"},
 ]
 
