@@ -390,7 +390,13 @@ async def combo_first_cat(
     cat = callback.data.split(":", 1)[1]
     await state.update_data(combo_cat=cat)
     tricks = (
-        (await session.execute(select(Trick).where(Trick.category == cat)))
+        (
+            await session.execute(
+                select(Trick)
+                .where(Trick.category == cat)
+                .order_by(Trick.base_tech_points.desc())
+            )
+        )
         .scalars()
         .all()
     )
@@ -592,7 +598,9 @@ async def combo_next_cat(
     tricks = (
         (
             await session.execute(
-                select(Trick).where(Trick.category == callback_data.category)
+                select(Trick)
+                .where(Trick.category == callback_data.category)
+                .order_by(Trick.base_tech_points.desc())
             )
         )
         .scalars()
@@ -913,7 +921,13 @@ async def _back_to_trick_list(
     tricks = []
     if category:
         tricks = (
-            (await session.execute(select(Trick).where(Trick.category == category)))
+            (
+                await session.execute(
+                    select(Trick)
+                    .where(Trick.category == category)
+                    .order_by(Trick.base_tech_points.desc())
+                )
+            )
             .scalars()
             .all()
         )

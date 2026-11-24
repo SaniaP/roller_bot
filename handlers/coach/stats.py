@@ -292,12 +292,16 @@ async def build_rating_text(
     if age != "all":
         today = date.today()
         if age == "kids":
-            query = query.where(User.birth_date >= _years_ago(today, 7))
+            # Строго младше 8 лет (подпись «До 7 лет» — условная, чтобы не терять
+            # детей 7..8 лет: раньше они выпадали из kids и teens одновременно)
+            query = query.where(User.birth_date > _years_ago(today, 8))
         elif age == "teens":
+            # От 8 до 17 лет включительно, без зазора с kids
             query = query.where(
-                User.birth_date.between(_years_ago(today, 17), _years_ago(today, 8))
+                User.birth_date.between(_years_ago(today, 18), _years_ago(today, 8))
             )
         elif age == "adults":
+            # 18+: строго старше 18 лет
             query = query.where(User.birth_date < _years_ago(today, 18))
 
     # Сортировка
@@ -376,8 +380,8 @@ def build_rating_keyboard(
     # Ряд 0 — область видимости ТОПа (только для тренера/ученика с тренером)
     if scope is not None:
         scopes = [
-            (RATING_SCOPE_MY, "👤 Мой ТОП"),
-            (RATING_SCOPE_COMMUNITY, "🏘 Сообщество"),
+            (RATING_SCOPE_MY, "👤 Группа"),
+            (RATING_SCOPE_COMMUNITY, "👥 Клуб"),
             (RATING_SCOPE_GLOBAL, "🌍 Общий"),
         ]
         builder.row(
@@ -401,7 +405,7 @@ def build_rating_keyboard(
         ),
     )
     # Ряд 2 — возраст
-    ages = [("all", "Все"), ("kids", "До 7 лет"), ("teens", "8-17"), ("adults", "18+")]
+    ages = [("all", "Все"), ("kids", "До 8 лет"), ("teens", "8-17"), ("adults", "18+")]
     builder.row(
         *[
             InlineKeyboardButton(
@@ -411,17 +415,17 @@ def build_rating_keyboard(
             for val, label in ages
         ]
     )
-    # Ряд 3 — ранг
-    builder.row(
-        InlineKeyboardButton(
-            text=f"{mark(rank == 'all')}Все ранги",
-            callback_data=f"rating:{sort}:{age}:all",
-        ),
-        InlineKeyboardButton(
-            text=f"{mark(rank == 'novice')}Новички",
-            callback_data=f"rating:{sort}:{age}:novice",
-        ),
-    )
+    # Ряд 3 — ранг (временно отключен)
+    # builder.row(
+    #     InlineKeyboardButton(
+    #         text=f"{mark(rank == 'all')}Все ранги",
+    #         callback_data=f"rating:{sort}:{age}:all",
+    #     ),
+    #     InlineKeyboardButton(
+    #         text=f"{mark(rank == 'novice')}Новички",
+    #         callback_data=f"rating:{sort}:{age}:novice",
+    #     ),
+    # )
 
     kb = builder.as_markup()
 
@@ -485,13 +489,15 @@ async def ratings(message: Message, session: AsyncSession):
         return
 
     # Сценарий Б: ученик или зритель — фильтры без кнопок профилей.
-    # У ученика с тренером доступен переключатель области ТОПа.
+    # У одобренного пользователя доступен переключатель области ТОПа
+    # (Группа/Клуб/Общий): у ученика с тренером — полная логика scope,
+    # у остальных — клуб/общий через их же обработчики.
     has_coach = (
         await session.scalar(
             select(CoachStudent.id).where(CoachStudent.student_id == user.id).limit(1)
         )
     ) is not None
-    scope = RATING_SCOPE_MY if has_coach else None
+    scope = RATING_SCOPE_MY if has_coach else RATING_SCOPE_GLOBAL
     text = await build_rating_text(
         session, "exp", "all", "all", scope=scope, telegram_id=tg_id
     )
@@ -1051,7 +1057,11 @@ async def build_student_profile_text(student: User, session: AsyncSession) -> st
 
     # Формируем строку параметров (Возраст и Статус)
     if student.birth_date:
-        age_str = f"📅 <b>Возраст:</b> {calculate_age(student.birth_date)} лет"
+        age = calculate_age(student.birth_date)
+        if age > 18:
+            age_str = "📅 <b>Возраст:</b> 18+"
+        else:
+            age_str = f"📅 <b>Возраст:</b> {age} лет"
     else:
         age_str = "📅 <b>Возраст:</b> не указан"
 

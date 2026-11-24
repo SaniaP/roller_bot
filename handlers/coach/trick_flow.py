@@ -128,7 +128,9 @@ async def process_choose_trick(
     tricks = (
         (
             await session.execute(
-                select(Trick).where(Trick.category == callback_data.category)
+                select(Trick)
+                .where(Trick.category == callback_data.category)
+                .order_by(Trick.base_tech_points.desc())
             )
         )
         .scalars()

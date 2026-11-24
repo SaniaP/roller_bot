@@ -45,7 +45,11 @@ async def show_handbook_tricks(
     callback: CallbackQuery, callback_data: HandbookAction, session: AsyncSession
 ):
     """Список трюков выбранной категории с их параметрами"""
-    tricks_stmt = select(Trick).where(Trick.category == callback_data.category)
+    tricks_stmt = (
+        select(Trick)
+        .where(Trick.category == callback_data.category)
+        .order_by(Trick.base_tech_points.desc())
+    )
     tricks = (await session.execute(tricks_stmt)).scalars().all()
 
     builder = InlineKeyboardBuilder()
