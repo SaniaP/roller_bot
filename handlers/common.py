@@ -974,3 +974,42 @@ async def simulate_new_user(message: Message, state: FSMContext, session: AsyncS
         "создаст новую заявку и отправит её тренеру на одобрение.",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("view_users"))
+async def view_users(message: Message, session: AsyncSession):
+    """Временная команда для Шефа: выводит 10 последних пользователей."""
+    tg_id = message.from_user.id
+
+    if tg_id != CHIEF_COACH_ID:
+        await message.answer(
+            "⛔ Ошибка доступа. Данная команда предназначена только для главного тренера."
+        )
+        return
+
+    users = (
+        await session.execute(select(User).order_by(User.id.desc()).limit(10))
+    ).scalars().all()
+
+    if not users:
+        await message.answer("В базе пока нет пользователей.")
+        return
+
+    header = (
+        f"{'ID':<4} {'TELEGRAM_ID':<14} {'ROLE':<10} {'FULL_NAME':<20} "
+        f"{'IS_APPROVED':<13} {'LEVEL':<6} {'XP':<7} {'TITLE':<12} "
+        f"{'BIRTH_DATE':<12} {'VIEWER_FOR_ID':<14} {'RELATION':<30} {'IS_SOLO':<7}"
+    )
+    sep = "-" * len(header)
+    lines = [header, sep]
+    for u in users:
+        tg_link = f"<a href='tg://user?id={u.telegram_id}'>{u.telegram_id}</a>" if u.telegram_id else ""
+        lines.append(
+            f"{u.id:<4} {tg_link:<14} {u.role:<10} "
+            f"{str(u.full_name or '')[:20]:<20} {str(u.is_approved):<13} "
+            f"{u.level:<6} {u.xp:<7} {str(u.title or '')[:12]:<12} "
+            f"{str(u.birth_date or ''):<12} {str(u.viewer_for_id or ''):<14} "
+            f"{str(u.relation or '')[:30]:<30} {str(u.is_solo):<7}"
+        )
+    text = "\n".join(lines)
+    await message.answer(text, parse_mode="HTML")
