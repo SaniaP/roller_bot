@@ -18,7 +18,7 @@ from aiogram.types import (
 from aiogram.filters.callback_data import CallbackData
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_, and_
 
 from config import CHIEF_COACH_ID
 from models import (
@@ -737,6 +737,50 @@ def _mult_note(multiplier: float | None) -> str:
     return f" • кач. {multiplier:.2f}"
 
 
+async def _level_reqs_at_workout(
+    student: User, workout: Workout, session: AsyncSession
+) -> LevelExperience | None:
+    """LevelExperience на момент тренировки.
+
+    Уровень на дату тренировки восстанавливается ретроспективно:
+    суммируем experience закрытых тренировок, ПРЕДШЕСТВУЮЩИХ данной
+    (без самой тренировки — её XP начисляется в момент закрытия,
+    а нормы действуют на старт тренировки), и находим уровень из
+    справочника. Для активной тренировки — требования текущего уровня.
+    """
+    if workout.status != STATUS_CLOSED:
+        return await session.get(LevelExperience, student.level)
+
+    cum_xp = (
+        await session.scalar(
+            select(func.coalesce(func.sum(WorkoutRegistration.training_xp), 0))
+            .join(Workout, Workout.id == WorkoutRegistration.workout_id)
+            .where(
+                WorkoutRegistration.student_id == student.id,
+                Workout.status == STATUS_CLOSED,
+                or_(
+                    Workout.date < workout.date,
+                    and_(Workout.date == workout.date, Workout.id < workout.id),
+                ),
+            )
+        )
+    ) or 0
+
+    level = 1
+    reqs_by_level: dict[int, LevelExperience] = {}
+    for le in (
+        (await session.execute(select(LevelExperience).order_by(LevelExperience.level)))
+        .scalars()
+        .all()
+    ):
+        reqs_by_level[le.level] = le
+        if le.required_xp <= cum_xp:
+            level = max(level, le.level)
+
+    # Фолбэк на текущий уровень, если справочник неполный
+    return reqs_by_level.get(level) or await session.get(LevelExperience, student.level)
+
+
 def build_workout_log_text(
     workout: Workout,
     reg: WorkoutRegistration,
@@ -1256,7 +1300,8 @@ async def stats_workout_details(
         )
     ).all()
 
-    level_reqs = await session.get(LevelExperience, student.level)
+    # Требования уровня на момент тренировки, а не текущие
+    level_reqs = await _level_reqs_at_workout(student, workout, session)
     combo_exp = await _combo_exp_map(logs, student, session)
     text = build_workout_log_text(workout, reg, student, logs, level_reqs, combo_exp)
 

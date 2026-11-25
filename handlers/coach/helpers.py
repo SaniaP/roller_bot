@@ -307,12 +307,17 @@ async def show_skater_card_or_main_list(
     base_points = sum(sport_results[:8]) / 8.0
     live_score = round(base_points - points_penalty, 2)
 
-    # Опыт: агрегаты связок + одиночные трюки (шаги связок лично не в зачете)
-    live_xp = sum(combo_exp.values()) + sum(
+    # Опыт: агрегаты связок + одиночные трюки (шаги связок лично не в зачете).
+    # В зачет идут только max_logs лучших результатов — как в калькуляторе
+    # (топ-N по XP), а не сумма всего подряд.
+    xp_results: list[int] = list(combo_exp.values()) + [
         log.calculated_xp for log, _t in pairs if not log.combo_id
-    )
+    ]
+    xp_results.sort(reverse=True)
 
     max_logs = level_reqs.max_workout_logs if level_reqs else 10
+    live_xp = sum(xp_results[:max_logs])
+
     min_categories = level_reqs.min_trick_categories if level_reqs else 3
 
     def _chk(done, total):
