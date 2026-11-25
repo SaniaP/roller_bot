@@ -26,7 +26,6 @@ from calculator import calculate_current_workout_totals, check_level_up
 from handlers.coach.helpers import (
     get_coach_menu_for,
     get_coach_menu_for_tg,
-    get_active_workout,
     get_workout_students,
     new_workout_now,
     show_skater_card_or_main_list,
@@ -50,13 +49,27 @@ async def coach_start_workout(
         await message.answer("⛔ Только тренер может начать тренировку.")
         return
 
-    active_workout = await get_active_workout(session, coach_id=coach.id)
+    # Все активные тренировки этого тренера (от новой к старой)
+    active_workouts = (
+        await session.execute(
+            select(Workout)
+            .where(
+                Workout.status == STATUS_ACTIVE,
+                Workout.coach_id == coach.id,
+            )
+            .order_by(Workout.date.desc(), Workout.id.desc())
+        )
+    ).scalars().all()
 
-    if active_workout:
-        # Продолжаем: собираем текущий список спортсменов на занятии
-        current_students = await get_workout_students(session, active_workout.id)
+    if active_workouts:
+        # Продолжаем самую свежую тренировку, остальные активные закрываем
+        active_workout = active_workouts[0]
+        for old in active_workouts[1:]:
+            old.status = STATUS_CLOSED
+        await session.commit()
 
         # Выводим сообщение о продолжении тренировки и показываем сохраненный ранее пин-код
+        current_students = await get_workout_students(session, active_workout.id)
         await message.answer(
             f"🏋️‍♂️ **ИДЕТ ТРЕНИРОВКА**\n\n"
             f"PIN-код для подключения учеников: `{active_workout.pin_code}`\n\n"

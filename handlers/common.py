@@ -141,10 +141,17 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     # ЛОГИКА ТРЕНЕРА (ОСТАЛАСЬ БЕЗ ИЗМЕНЕНИЙ)
     # ==========================================
     if user.role == "coach":
-        # Проверяем, есть ли активная тренировка, чтобы показать кнопку «Продолжить»
+        # Проверяем, есть ли активная тренировка ИМЕННО этого тренера,
+        # чтобы показать кнопку «Продолжить» (чужие активные тренировки
+        # и соло-тренировки спортсменов не должны влиять на его меню)
         active_w = (
             await session.execute(
-                select(Workout).where(Workout.status == STATUS_ACTIVE).limit(1)
+                select(Workout)
+                .where(
+                    Workout.status == STATUS_ACTIVE,
+                    Workout.coach_id == user.id,
+                )
+                .limit(1)
             )
         ).scalar_one_or_none()
         await message.answer(
@@ -911,10 +918,20 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
         await stub.set_state(None)
         await stub.set_data({})
 
-        # Проверяем активную тренировку для правильного отображения меню тренера
+        # Активная тренировка ИМЕННО этого тренера (не чужая и не соло)
+        coach = (
+            await session.execute(
+                select(User).where(User.telegram_id == tg_id)
+            )
+        ).scalar_one_or_none()
         active_w = (
             await session.execute(
-                select(Workout).where(Workout.status == STATUS_ACTIVE).limit(1)
+                select(Workout)
+                .where(
+                    Workout.status == STATUS_ACTIVE,
+                    Workout.coach_id == (coach.id if coach else -1),
+                )
+                .limit(1)
             )
         ).scalar_one_or_none()
 

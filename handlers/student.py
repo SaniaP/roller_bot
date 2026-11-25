@@ -130,23 +130,11 @@ async def solo_start_workout(
         )
         return
 
-    # Уже есть активная личная тренировка — продолжаем её
-    active_w = (
-        (
-            await session.execute(
-                select(Workout).where(
-                    Workout.status == STATUS_ACTIVE,
-                    Workout.is_solo.is_(True),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    # Активные личные тренировки этого спортсмена (от новой к старой)
     regs = (
         (
             await session.execute(
-                select(WorkoutRegistration).where(
+                select(WorkoutRegistration.workout_id).where(
                     WorkoutRegistration.student_id == user.id
                 )
             )
@@ -154,13 +142,30 @@ async def solo_start_workout(
         .scalars()
         .all()
     )
-    my_workout_ids = {r.workout_id for r in regs}
-    solo_active = next(
-        (w for w in active_w if w.id in my_workout_ids),
-        None,
+
+    active_w = (
+        (
+            await session.execute(
+                select(Workout)
+                .where(
+                    Workout.status == STATUS_ACTIVE,
+                    Workout.is_solo.is_(True),
+                    Workout.id.in_(regs or [0]),
+                )
+                .order_by(Workout.date.desc(), Workout.id.desc())
+            )
+        )
+        .scalars()
+        .all()
     )
 
-    workout = solo_active
+    # Продолжаем самую свежую, остальные активные закрываем
+    workout = active_w[0] if active_w else None
+    if len(active_w) > 1:
+        for old in active_w[1:]:
+            old.status = STATUS_CLOSED
+        await session.commit()
+
     if workout is None:
         workout = Workout(
             date=datetime.now(timezone.utc),
@@ -354,8 +359,12 @@ async def student_process_pin(
         from handlers.coach.helpers import get_workout_students
         from keyboards.coach_kb import get_active_workout_kb
 
+        # Уведомляем только тренера-владельца ЭТОЙ тренировки,
+        # а не первого попавшегося тренера из БД
         coach = (
-            await session.execute(select(User).where(User.role == "coach").limit(1))
+            await session.execute(
+                select(User).where(User.id == active_workout.coach_id).limit(1)
+            )
         ).scalar_one_or_none()
         if coach and coach.telegram_id:
             current_students = await get_workout_students(session, active_workout.id)
