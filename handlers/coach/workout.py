@@ -51,15 +51,19 @@ async def coach_start_workout(
 
     # Все активные тренировки этого тренера (от новой к старой)
     active_workouts = (
-        await session.execute(
-            select(Workout)
-            .where(
-                Workout.status == STATUS_ACTIVE,
-                Workout.coach_id == coach.id,
+        (
+            await session.execute(
+                select(Workout)
+                .where(
+                    Workout.status == STATUS_ACTIVE,
+                    Workout.coach_id == coach.id,
+                )
+                .order_by(Workout.date.desc(), Workout.id.desc())
             )
-            .order_by(Workout.date.desc(), Workout.id.desc())
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     if active_workouts:
         # Продолжаем самую свежую тренировку, остальные активные закрываем
@@ -227,9 +231,7 @@ async def process_finish_workout(
         await callback.message.delete()
         await callback.message.answer(
             "🏁 Тренировка завершена (учеников не было).",
-            reply_markup=await get_coach_menu_for_tg(
-                session, callback.from_user.id
-            ),
+            reply_markup=await get_coach_menu_for_tg(session, callback.from_user.id),
         )
         return
 
@@ -262,7 +264,7 @@ async def process_finish_workout(
     summary_report = "🏁 ТРЕНИРОВКА ЗАВЕРШЕНА И ПОСЧИТАНА!\n\n"
     bot_id = callback.bot.id
 
-    for reg in registrations:
+    for reg in list(registrations):
         # Достаем ученика из созданного словаря без запроса к БД
         student = students_dict.get(reg.student_id)
         if not student:
@@ -270,6 +272,12 @@ async def process_finish_workout(
 
         # Достаем логи ученика из словаря
         student_logs = logs_by_student.get(student.id, [])
+
+        # Ученик без записанных трюков: регистрацию удаляем, ничего не начисляем
+        if not student_logs:
+            await session.delete(reg)
+            registrations.remove(reg)
+            continue
 
         # Считаем финальные итоги через калькулятор
         final_sport_score, final_xp_gain = await calculate_current_workout_totals(
@@ -287,18 +295,21 @@ async def process_finish_workout(
         new_level, level_upgraded = await check_level_up(
             student.level, student.xp, session
         )
-        lvl_up_text = ""
-
         if level_upgraded:
             student.level = new_level
             # Фиксируем на регистрации: именно эта тренировка подняла уровень
             reg.caused_level_up = True
-            lvl_up_text = f" 🔥 LEVEL UP! Новый уровень: {new_level}!"
-
-        summary_report += (
-            f"🏃‍♂️ {student.full_name}:\n"
-            f"Score: {final_sport_score} | EXP: +{final_xp_gain}{lvl_up_text}\n\n"
-        )
+            summary_report += (
+                f"🏃‍♂️ {student.full_name}:\n"
+                f"Score: {final_sport_score} | EXP: +{final_xp_gain} 🔥 LEVEL UP! "
+                f"Новый уровень: {new_level}!\n\n"
+            )
+        else:
+            summary_report += (
+                f"🏃‍♂️ {student.full_name}:\n"
+                f"Score: {final_sport_score} | EXP: +{final_xp_gain}\n"
+                f"Уровень {student.level}\n\n"
+            )
 
     # Закрываем тренировку и сохраняем все изменения одним пакетом
     workout.status = STATUS_CLOSED
@@ -331,10 +342,37 @@ async def process_finish_workout(
             # Ученик мог заблокировать бота — не прерываем закрытие тренировки
             pass
 
+    # Уведомляем зрителей, закрепленных за учениками этой тренировки
+    viewers_result = await session.execute(
+        select(User).where(
+            User.role == "viewer",
+            User.viewer_for_id.in_(student_ids),
+            User.telegram_id.isnot(None),
+        )
+    )
+    for viewer in viewers_result.scalars().all():
+        reg = next(
+            (r for r in registrations if r.student_id == viewer.viewer_for_id), None
+        )
+        if not reg:
+            continue
+        student = students_dict.get(reg.student_id)
+        try:
+            await callback.bot.send_message(
+                viewer.telegram_id,
+                "🏁 Тренировка завершена тренером.\n"
+                f"Итог {student.full_name}: {reg.training_points} очков, "
+                f"+{reg.training_xp} EXP.",
+            )
+        except Exception:
+            # Зритель мог заблокировать бота — не прерываем закрытие тренировки
+            pass
+
     # Сбрасываем FSM тренера и возвращаем его в главное меню
     await state.clear()
 
     await callback.message.delete()
     await callback.message.answer(
-        summary_report, reply_markup=await get_coach_menu_for_tg(session, callback.from_user.id)
+        summary_report,
+        reply_markup=await get_coach_menu_for_tg(session, callback.from_user.id),
     )
