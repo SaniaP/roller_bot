@@ -20,7 +20,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
 
-from config import CHIEF_COACH_ID
 from models import (
     STATUS_ACTIVE,
     STATUS_CLOSED,
@@ -524,9 +523,8 @@ async def ratings(message: Message, session: AsyncSession):
         await message.answer(text, parse_mode="HTML")
         return
 
-    # Сценарий В: главный тренер (по ТЕКУЩЕЙ роли в базе — в режиме
-    # тестирования ученика он видит рейтинги как обычный пользователь)
-    if user.role == "coach" and tg_id == CHIEF_COACH_ID:
+    # Сценарий В: любой тренер (главный или играющий, в т.ч. athlete mode)
+    if user.role == "coach":
         students = await get_coach_students(session, user.id) or await _global_students(
             session
         )
@@ -591,7 +589,7 @@ async def rating_filters(callback: CallbackQuery, session: AsyncSession):
     user = (
         await session.execute(select(User).where(User.telegram_id == tg_id))
     ).scalar_one_or_none()
-    is_coach = user is not None and user.role == "coach" and tg_id == CHIEF_COACH_ID
+    is_coach = user is not None and user.role == "coach"
     # Неодобренный пользователь не должен уметь раскрывать полный рейтинг фильтрами
     if user is not None and not user.is_approved and not is_coach:
         text = await build_rating_text(session, sort, age, rank, limit=10)

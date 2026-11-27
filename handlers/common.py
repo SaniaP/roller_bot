@@ -155,8 +155,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             )
         ).scalar_one_or_none()
         await message.answer(
-            f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{escape(user.full_name or '')}</b>!\n"
-            "Все судейские связки и лимиты опыта активны. Выберите действие:",
+            f"👑 Добро пожаловать, Тренер <b>{escape(user.full_name or '')}</b>!\n"
+            "Все судейские связки и лимиты опыта активны. Готов к работе!",
             reply_markup=get_coach_main_menu_sync(
                 has_active_workout=active_w is not None,
                 # Тренер в режиме спортсмена (athlete_community_id заполнен)

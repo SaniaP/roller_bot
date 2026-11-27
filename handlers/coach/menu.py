@@ -101,7 +101,7 @@ async def coach_add_student_finish(
 # ==========================================
 
 
-@router.message(F.text == "🏂 Меню спортсмена")
+@router.message(F.text == "🤸 Меню спортсмена")
 async def coach_to_athlete_menu(message: Message, session: AsyncSession):
     """Тренер переключается в интерфейс спортсмена (без изменения БД).
     Кнопка видна только при включенном athlete-mode."""
@@ -133,9 +133,8 @@ async def coach_to_athlete_menu(message: Message, session: AsyncSession):
     ).scalar_one_or_none() is not None
 
     await message.answer(
-        "🏂 <b>Режим спортсмена</b>\n\n"
-        "Вы выступаете как спортсмен за свое комьюнити. "
-        "Личные тренировки идут в его рейтинг и не мешают вашим ученикам.",
+        "🤸 <b>Режим спортсмена</b>\n\n"
+        "Ваши результаты попадают в рейтинг по клубу и в общий рейтинг ",
         reply_markup=get_student_main_menu(
             is_solo=True,
             is_coach=True,

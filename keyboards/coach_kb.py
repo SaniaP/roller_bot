@@ -60,7 +60,7 @@ def get_coach_main_menu_sync(
     if athlete_mode:
         builder.row(
             KeyboardButton(text=workout_btn_text),
-            KeyboardButton(text="🏂 Меню спортсмена"),
+            KeyboardButton(text="🤸 Меню спортсмена"),
         )
     else:
         builder.row(KeyboardButton(text=workout_btn_text))

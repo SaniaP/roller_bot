@@ -26,7 +26,7 @@ from database import async_session
 # ============================================
 # КОНФИГУРАЦИЯ
 # ============================================
-USER_IDS_TO_DELETE = [78]
+USER_IDS_TO_DELETE = [7811]
 
 
 async def delete_users_cascade():

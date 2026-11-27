@@ -24,7 +24,7 @@ from models import Community, CommunityCoach, User
 # ============================================
 # КОНФИГУРАЦИЯ
 # ============================================
-USER_IDS_TO_ADD = [81]  # id пользователей из таблицы users или пусто если юзер новый
+USER_IDS_TO_ADD = [73]  # id пользователей из таблицы users или пусто если юзер новый
 COMMUNITY_NAME = "Inmove"  # имя комьюнити (создаётся, если его нет)
 COMMUNITY_ID = (
     3  # id конкретного комьюнити (приоритетнее имени; None = искать по имени)
@@ -102,6 +102,21 @@ async def add_coaches_to_community():
                 user.is_solo = False
                 print(f"Пользователь id={uid} выведен из соло-режима (is_solo=False).")
 
+            # Режим спортсмена: тренер выступает как спортсмен за это комьюнити.
+            # Выставляем ДО проверки «уже в комьюнити», чтобы режим включался
+            # даже если связь CommunityCoach уже существует.
+            if ENABLE_ATHLETE_MODE:
+                if user.athlete_community_id == community.id:
+                    print(
+                        f"Режим спортсмена уже включен (athlete_community_id={community.id})."
+                    )
+                else:
+                    user.athlete_community_id = community.id
+                    print(
+                        f"Включен режим спортсмена: athlete_community_id={community.id} "
+                        f"('{community.name}')."
+                    )
+
             # Проверяем, не состоит ли уже в этом комьюнити
             exists = await session.execute(
                 select(CommunityCoach).where(
@@ -115,19 +130,6 @@ async def add_coaches_to_community():
 
             session.add(CommunityCoach(community_id=community.id, coach_id=uid))
             print(f"Пользователь id={uid} ({user.full_name}) добавлен в комьюнити.")
-
-            # Режим спортсмена: тренер выступает как спортсмен за это комьюнити
-            if ENABLE_ATHLETE_MODE:
-                if user.athlete_community_id == community.id:
-                    print(
-                        f"Режим спортсмена уже включен (athlete_community_id={community.id})."
-                    )
-                else:
-                    user.athlete_community_id = community.id
-                    print(
-                        f"Включен режим спортсмена: athlete_community_id={community.id} "
-                        f"('{community.name}')."
-                    )
 
         # 3. Создать новых пользователей (если их нет в базе) и добавить в комьюнити
         if CREATE_IF_MISSING:
