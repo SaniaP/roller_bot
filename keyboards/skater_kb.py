@@ -11,19 +11,50 @@ from aiogram import types
 # =====================================================================
 
 
-def get_student_main_menu(is_solo: bool = False) -> ReplyKeyboardMarkup:
+def get_student_main_menu(
+    is_solo: bool = False,
+    is_coach: bool = False,
+    has_active_workout: bool = False,
+) -> ReplyKeyboardMarkup:
     """Главное меню ученика вне тренировочного процесса.
-    Для соло-спортсмена вместо PIN — кнопка личной тренировки и привязка к тренеру."""
+    Для соло-спортсмена вместо PIN — кнопка личной тренировки и привязка к тренеру.
+    Для тренера в режиме спортсмена (is_coach=True) вместо «Привязаться к тренеру»
+    показывается кнопка возврата в меню тренера.
+    has_active_workout — у спортсмена есть незавершенная личная тренировка:
+    кнопка называется «▶️ Продолжить личную тренировку»."""
     if is_solo:
+        bottom_row = [
+            KeyboardButton(text="🔗 Привязаться к тренеру")
+            if not is_coach
+            else KeyboardButton(text="👨‍🏫 Меню тренера")
+        ]
+        workout_btn_text = (
+            "▶️ Продолжить личную тренировку"
+            if has_active_workout
+            else "▶️ Начать личную тренировку"
+        )
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="👤 Мой персонаж")],
-                [KeyboardButton(text="▶️ Начать личную тренировку")],
+                [KeyboardButton(text=workout_btn_text)],
                 [
                     KeyboardButton(text="📚 База трюков"),
                     KeyboardButton(text="📈 Рейтинги"),
                 ],
-                [KeyboardButton(text="🔗 Привязаться к тренеру")],
+                bottom_row,
+            ],
+            resize_keyboard=True,
+        )
+    if is_coach:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="👤 Мой персонаж")],
+                [KeyboardButton(text="🔑 Подключиться к тренировке")],
+                [
+                    KeyboardButton(text="📚 База трюков"),
+                    KeyboardButton(text="📈 Рейтинги"),
+                ],
+                [KeyboardButton(text="👨‍🏫 Меню тренера")],
             ],
             resize_keyboard=True,
         )

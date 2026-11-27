@@ -126,6 +126,9 @@ async def _rating_students_for_scope(
     if scope == RATING_SCOPE_MY:
         if not coach_id:
             return None
+        # Только ученики текущего тренера. Соло-тренировки самого тренера
+        # отсекаются на уровне Workout (is_solo / community_id) в build_rating_text,
+        # поэтому в список рейтинга они не попадают вообще.
         ids = (
             (
                 await session.execute(
@@ -166,6 +169,8 @@ async def _rating_students_for_scope(
             .scalars()
             .all()
         )
+        # Ученики всех тренеров комьюнити + сами тренеры, выступающие
+        # в роли спортсменов за это комьюнити (is_athlete_mode).
         ids = (
             (
                 await session.execute(
@@ -177,14 +182,45 @@ async def _rating_students_for_scope(
             .scalars()
             .all()
         )
-        return ids or [0]
-
-    if scope == RATING_SCOPE_GLOBAL:
-        ids = (
-            (await session.execute(select(CoachStudent.student_id).distinct()))
+        athlete_coach_ids = (
+            (
+                await session.execute(
+                    select(User.id).where(
+                        User.role == "coach",
+                        User.athlete_community_id.in_(community_ids),
+                    )
+                )
+            )
             .scalars()
             .all()
         )
+        ids = list(set(ids) | set(athlete_coach_ids))
+        return ids or [0]
+
+    if scope == RATING_SCOPE_GLOBAL:
+        # Все ученики с тренером + все тренеры-спортсмены (athlete mode).
+        ids = (
+            (
+                await session.execute(
+                    select(CoachStudent.student_id).distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        athlete_coach_ids = (
+            (
+                await session.execute(
+                    select(User.id).where(
+                        User.role == "coach",
+                        User.athlete_community_id.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ids = list(set(ids) | set(athlete_coach_ids))
         return ids or [0]
 
     return None
@@ -284,12 +320,21 @@ async def build_rating_text(
     Соло-спортсмены (is_solo=True) и соло-тренировки исключены всегда:
     в рейтинг попадают только спортсмены, имеющие привязку в CoachStudent."""
     query = select(User).where(
-        User.role == "student",
         User.is_approved == True,  # noqa: E712
         # Соло-игроки не участвуют в общих/клубных рейтингах
         User.is_solo.is_(False),
-        # Только спортсмены с тренером (привязка в CoachStudent)
-        User.id.in_(select(CoachStudent.student_id).distinct()),
+        # Спортсмены с тренером (привязка в CoachStudent) ИЛИ тренеры,
+        # выступающие в роли спортсменов за комьюнити (athlete mode)
+        or_(
+            and_(
+                User.role == "student",
+                User.id.in_(select(CoachStudent.student_id).distinct()),
+            ),
+            and_(
+                User.role == "coach",
+                User.athlete_community_id.is_not(None),
+            ),
+        ),
     )
 
     # Область видимости ТОПа
@@ -678,12 +723,22 @@ async def coach_rating_entry(message: Message, session: AsyncSession):
 
 async def _best_training_points(session: AsyncSession, student_id: int) -> float | None:
     """Лучший (максимальный) результат training_points спортсмена.
-    Соло-тренировки (Workout.is_solo) в рейтинге очков не учитываются."""
+
+    В зачет идут только закрытые тренировки (STATUS_CLOSED):
+      - обычные групповые (is_solo=False), в т.ч. тренировки любого тренера;
+      - соло-тренировки тренеров-спортсменов (is_solo=True, но
+        community_id заполнен историческим комьюнити выступления).
+    Обычные соло-тренировки спортсменов (community_id IS NULL) не учитываются.
+    """
     return await session.scalar(
         select(func.max(WorkoutRegistration.training_points))
         .where(
             WorkoutRegistration.student_id == student_id,
-            Workout.is_solo.is_(False),
+            Workout.status == STATUS_CLOSED,
+            or_(
+                Workout.is_solo.is_(False),
+                Workout.community_id.is_not(None),
+            ),
         )
         .join(Workout, Workout.id == WorkoutRegistration.workout_id)
     )
@@ -1351,6 +1406,21 @@ async def send_profile_message(bot, chat_id: int, user: User, session: AsyncSess
     kb = await _workout_details_kb(user, session, is_own_profile=True)
 
     file_id = user.photo_file_id
+
+    # file_id в Telegram валиден только для того бота, который его получил.
+    # Если профиль шлет другой бот (основной/тестовый), кэш чужой и Telegram
+    # отвечает «wrong file identifier» — сбрасываем и кэшируем заново текущим ботом.
+    if file_id:
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=file_id)
+        except Exception as e:
+            logger.warning(
+                f"Кэш аватарки невалиден для этого бота (user {user.id}): {e}. "
+                "Пересоздаю кэш текущим ботом."
+            )
+            file_id = None
+            user.photo_file_id = None
+            await session.commit()
 
     # Пробуем достать аватарку из Telegram, если она еще не закэширована
     if not file_id:

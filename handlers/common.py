@@ -158,7 +158,10 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             f"👑 Рады видеть вас, Шеф! Добро пожаловать, Тренер <b>{escape(user.full_name or '')}</b>!\n"
             "Все судейские связки и лимиты опыта активны. Выберите действие:",
             reply_markup=get_coach_main_menu_sync(
-                has_active_workout=active_w is not None
+                has_active_workout=active_w is not None,
+                # Тренер в режиме спортсмена (athlete_community_id заполнен)
+                # сразу видит и «🏋️ Начать тренировку», и «🏂 Меню спортсмена»
+                athlete_mode=user.is_athlete_mode,
             ),
             parse_mode="HTML",
         )
@@ -188,11 +191,35 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
             )
         # Если одобрен — открываем доступ к панели управления
         else:
+            # Динамическая кнопка личной тренировки: если есть незавершенная —
+            # «▶️ Продолжить личную тренировку»
+            is_coach_athlete = user.is_athlete_mode
+            has_active_workout = False
+            if user.is_solo or is_coach_athlete:
+                has_active_workout = (
+                    await session.execute(
+                        select(Workout.id)
+                        .join(
+                            WorkoutRegistration,
+                            WorkoutRegistration.workout_id == Workout.id,
+                        )
+                        .where(
+                            WorkoutRegistration.student_id == user.id,
+                            Workout.status == STATUS_ACTIVE,
+                            Workout.is_solo.is_(True),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none() is not None
             await message.answer(
                 f"🛹 Привет, <b>{escape(user.full_name or '')}</b>!\n"
                 f"Твой текущий уровень: <b>{user.level}</b> лвл. Ты готов прокачаться?!\n"
                 "Выбирай действие на панели управления:",
-                reply_markup=get_student_main_menu(is_solo=bool(user.is_solo)),
+                reply_markup=get_student_main_menu(
+                    is_solo=bool(user.is_solo),
+                    is_coach=is_coach_athlete,
+                    has_active_workout=has_active_workout,
+                ),
                 parse_mode="HTML",
             )
 
@@ -940,7 +967,8 @@ async def toggle_test_mode(message: Message, state: FSMContext, session: AsyncSe
             "Роль успешно возвращена на <code>coach</code>.\n"
             "Вам снова доступна панель управления процессом.",
             reply_markup=get_coach_main_menu_sync(
-                has_active_workout=active_w is not None
+                has_active_workout=active_w is not None,
+                athlete_mode=bool(coach and coach.is_athlete_mode),
             ),
             parse_mode="HTML",
         )

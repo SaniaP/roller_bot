@@ -24,8 +24,16 @@ from models import Community, CommunityCoach, User
 # ============================================
 # КОНФИГУРАЦИЯ
 # ============================================
-USER_IDS_TO_ADD = [78]  # id пользователей из таблицы users или пусто если юзер новый
+USER_IDS_TO_ADD = [81]  # id пользователей из таблицы users или пусто если юзер новый
 COMMUNITY_NAME = "Inmove"  # имя комьюнити (создаётся, если его нет)
+COMMUNITY_ID = (
+    3  # id конкретного комьюнити (приоритетнее имени; None = искать по имени)
+)
+
+# Включать тренеру режим спортсмена (athlete_mode) в этом комьюнити?
+# user.athlete_community_id = community.id — тренер выступает как спортсмен
+# за это комьюнити, не мешая своим ученикам в рейтингах.
+ENABLE_ATHLETE_MODE = True
 
 # Создавать пользователя, если его нет в базе?
 CREATE_IF_MISSING = True
@@ -33,7 +41,7 @@ CREATE_IF_MISSING = True
 # Данные для создания новых пользователей (используются, если CREATE_IF_MISSING=True).
 # Каждый пользователь создаётся со статусом coach и сразу добавляется в комьюнити.
 NEW_USERS_DATA = [
-    #{"telegram_id": 949090583, "full_name": "Anastacia", "phone": +375447276669},
+    # {"telegram_id": 949090583, "full_name": "Anastacia", "phone": +375447276669},
     # {"telegram_id": 987654321, "full_name": "Пётр Петров", "phone": "+79001234567"},
 ]
 
@@ -44,18 +52,30 @@ async def add_coaches_to_community():
         return
 
     async with async_session() as session:
-        # 1. Найти или создать комьюнити
-        result = await session.execute(
-            select(Community).where(Community.name == COMMUNITY_NAME)
-        )
-        community = result.scalar_one_or_none()
+        # 1. Найти или создать комьюнити (по COMMUNITY_ID, затем по имени)
+        community = None
+        if COMMUNITY_ID is not None:
+            community = await session.get(Community, COMMUNITY_ID)
+            if community:
+                print(
+                    f"Найдено комьюнити по id: '{community.name}' (id={community.id})"
+                )
+            else:
+                print(
+                    f"Комьюнити с id={COMMUNITY_ID} не найдено — ищем по имени '{COMMUNITY_NAME}'."
+                )
         if community is None:
-            community = Community(name=COMMUNITY_NAME)
-            session.add(community)
-            await session.flush()  # получаем community.id
-            print(f"Создано комьюнити: '{COMMUNITY_NAME}' (id={community.id})")
-        else:
-            print(f"Найдено комьюнити: '{COMMUNITY_NAME}' (id={community.id})")
+            result = await session.execute(
+                select(Community).where(Community.name == COMMUNITY_NAME)
+            )
+            community = result.scalar_one_or_none()
+            if community is None:
+                community = Community(name=COMMUNITY_NAME)
+                session.add(community)
+                await session.flush()  # получаем community.id
+                print(f"Создано комьюнити: '{COMMUNITY_NAME}' (id={community.id})")
+            else:
+                print(f"Найдено комьюнити: '{COMMUNITY_NAME}' (id={community.id})")
 
         # 2. Добавить каждого пользователя как тренера в комьюнити
         for uid in USER_IDS_TO_ADD:
@@ -78,6 +98,10 @@ async def add_coaches_to_community():
                 user.is_approved = True
                 print(f"Пользователь id={uid} подтверждён (is_approved=True).")
 
+            if user.is_solo:
+                user.is_solo = False
+                print(f"Пользователь id={uid} выведен из соло-режима (is_solo=False).")
+
             # Проверяем, не состоит ли уже в этом комьюнити
             exists = await session.execute(
                 select(CommunityCoach).where(
@@ -91,6 +115,19 @@ async def add_coaches_to_community():
 
             session.add(CommunityCoach(community_id=community.id, coach_id=uid))
             print(f"Пользователь id={uid} ({user.full_name}) добавлен в комьюнити.")
+
+            # Режим спортсмена: тренер выступает как спортсмен за это комьюнити
+            if ENABLE_ATHLETE_MODE:
+                if user.athlete_community_id == community.id:
+                    print(
+                        f"Режим спортсмена уже включен (athlete_community_id={community.id})."
+                    )
+                else:
+                    user.athlete_community_id = community.id
+                    print(
+                        f"Включен режим спортсмена: athlete_community_id={community.id} "
+                        f"('{community.name}')."
+                    )
 
         # 3. Создать новых пользователей (если их нет в базе) и добавить в комьюнити
         if CREATE_IF_MISSING:

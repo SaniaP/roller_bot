@@ -109,7 +109,9 @@ async def cancel_pin_input(message: Message, state: FSMContext, session: AsyncSe
     )
 
 
-@router.message(F.text == "▶️ Начать личную тренировку")
+@router.message(
+    F.text.in_({"▶️ Начать личную тренировку", "▶️ Продолжить личную тренировку"})
+)
 async def solo_start_workout(
     message: Message, state: FSMContext, session: AsyncSession
 ):
@@ -123,7 +125,9 @@ async def solo_start_workout(
     if not user or not user.is_approved:
         await message.answer("❌ Ваша учетная запись еще не одобрена.")
         return
-    if not user.is_solo:
+    # Обычный спортсмен без соло-режима и тренер вне athlete-mode не проходят
+    is_coach_athlete = user.role == "coach" and user.athlete_community_id is not None
+    if not user.is_solo and not is_coach_athlete:
         await message.answer(
             "⛔ Личная тренировка доступна только в одиночном режиме.",
             reply_markup=get_student_main_menu(),
@@ -171,8 +175,17 @@ async def solo_start_workout(
             date=datetime.now(timezone.utc),
             status=STATUS_ACTIVE,
             pin_code=None,
+            # Для тренера в режиме спортсмена: coach_id=None (не его групповая
+            # тренировка), is_solo=True (личная), но community_id запоминаем —
+            # исторический факт, за какое комьюнити он выступает в момент
+            # этой тренировки. Для обычного соло-спортсмена community_id=None.
             coach_id=None,
             is_solo=True,
+            community_id=(
+                user.athlete_community_id
+                if user.role == "coach" and user.athlete_community_id is not None
+                else None
+            ),
         )
         session.add(workout)
         await session.flush()
@@ -209,7 +222,8 @@ async def solo_finish_workout(
     workout_id = data.get("current_workout_id")
 
     workout = await session.get(Workout, workout_id) if workout_id else None
-    if not user or not user.is_solo:
+    # Тренер в режиме спортсмена тоже может завершить свою личную тренировку
+    if not user or not (user.is_solo or user.is_athlete_mode):
         # Обычную (тренерскую) тренировку завершает только тренер
         await message.answer(
             "⛔ Завершить тренировку может только соло-спортсмен на своей "
@@ -272,7 +286,9 @@ async def solo_finish_workout(
         f"🏁 <b>Личная тренировка завершена!</b>\n\n"
         f"🛹 Итог: {final_points:.1f} очков, +{final_xp} EXP{lvl_text}\n"
         f"Отчет сохранен в вашем архиве («👤 Мой персонаж»).",
-        reply_markup=get_student_main_menu(is_solo=True),
+        reply_markup=get_student_main_menu(
+            is_solo=True, is_coach=bool(user.is_athlete_mode)
+        ),
         parse_mode="HTML",
     )
 
@@ -568,7 +584,9 @@ async def student_undo_last(message: Message, state: FSMContext, session: AsyncS
     if not workout:
         await message.answer(
             "❌ Активная тренировка не найдена.",
-            reply_markup=get_student_main_menu(is_solo=bool(user.is_solo)),
+            reply_markup=get_student_main_menu(
+                is_solo=bool(user.is_solo), is_coach=user.is_athlete_mode
+            ),
         )
         await state.clear()
         return
@@ -582,7 +600,9 @@ async def student_undo_last(message: Message, state: FSMContext, session: AsyncS
     if not last_log:
         await message.answer(
             "📭 Нечего отменять: вы пока не отправляли трюки на этой тренировке.",
-            reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
+            reply_markup=get_student_training_menu(
+                is_solo=bool(user.is_solo or user.is_athlete_mode)
+            ),
         )
         return
 
@@ -628,7 +648,9 @@ async def student_undo_last(message: Message, state: FSMContext, session: AsyncS
             else ""
         )
         + "Можете продолжать тренировку.",
-        reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
+        reply_markup=get_student_training_menu(
+            is_solo=bool(user.is_solo or user.is_athlete_mode)
+        ),
     )
 
 
@@ -699,7 +721,9 @@ async def student_today_stats(
     if not logs:
         await message.answer(
             "📭 Вы пока не отправляли трюки на этой тренировке.",
-            reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
+            reply_markup=get_student_training_menu(
+                is_solo=bool(user.is_solo or user.is_athlete_mode)
+            ),
         )
         return
 
@@ -724,7 +748,9 @@ async def student_today_stats(
     )
     await message.answer(
         text,
-        reply_markup=get_student_training_menu(is_solo=bool(user.is_solo)),
+        reply_markup=get_student_training_menu(
+            is_solo=bool(user.is_solo or user.is_athlete_mode)
+        ),
         parse_mode="HTML",
     )
 
@@ -743,10 +769,43 @@ async def student_leave_workout(
             select(User).where(User.telegram_id == message.from_user.id)
         )
     ).scalar_one_or_none()
+    # Тренер в athlete-mode возвращается в меню спортсмена-тренера,
+    # а не в меню обычного соло-спортсмена
+    is_coach_athlete = bool(user and user.is_athlete_mode)
+    is_solo = bool(user and user.is_solo) or is_coach_athlete
+
+    # Проверяем, есть ли незавершенная личная тренировка — кнопка «Продолжить»
+    has_active_workout = False
+    if user:
+        has_active_workout = (
+            await session.execute(
+                select(Workout.id)
+                .join(
+                    WorkoutRegistration,
+                    WorkoutRegistration.workout_id == Workout.id,
+                )
+                .where(
+                    WorkoutRegistration.student_id == user.id,
+                    Workout.status == STATUS_ACTIVE,
+                    Workout.is_solo.is_(True),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none() is not None
+
     await message.answer(
-        "⬅️ Вы вернулись в главное меню. Тренировка продолжается — "
-        "подключитесь к ней снова по PIN-коду или начните личную.",
-        reply_markup=get_student_main_menu(is_solo=bool(user and user.is_solo)),
+        "⬅️ Вы вернулись в главное меню."
+        + (
+            "\n🏋️ Тренировка продолжается — нажмите «▶️ Продолжить личную тренировку», "
+            "чтобы вернуться к ней."
+            if has_active_workout
+            else ""
+        ),
+        reply_markup=get_student_main_menu(
+            is_solo=is_solo,
+            is_coach=is_coach_athlete,
+            has_active_workout=has_active_workout,
+        ),
     )
 
 

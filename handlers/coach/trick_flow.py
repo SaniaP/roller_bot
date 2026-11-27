@@ -221,9 +221,10 @@ async def process_cancel_input(
     if by_student:
         from keyboards.skater_kb import get_student_training_menu
 
-        # Ученик может быть соло-спортсменом — меню с «🏁 Завершить тренировку»
+        # Ученик может быть соло-спортсменом или тренером в athlete-mode —
+        # в обоих случаях тренировка личная и меню должно содержать «🏁 Завершить»
         student = await session.get(User, student_id)
-        is_solo = bool(student and student.is_solo)
+        is_solo = bool(student and (student.is_solo or student.is_athlete_mode))
 
         # Сбрасываем состояние в активную тренировку ученика
         await state.clear()
@@ -307,7 +308,8 @@ async def cancel_input_on_other_action(
         is_solo = False
         if student_id:
             student = await session.get(User, student_id)
-            is_solo = bool(student and student.is_solo)
+            # Тренер в athlete-mode тоже завершает свою личную тренировку сам
+            is_solo = bool(student and (student.is_solo or student.is_athlete_mode))
 
         await state.clear()
         await state.set_state(StudentStates.training_active)
@@ -456,8 +458,9 @@ async def _save_trick_log(
     student = await session.get(User, student_id)
     trick = await session.get(Trick, trick_id)
 
-    # Соло-спортсмен: трюки не на проверку, а сразу в зачет
-    solo_mode = bool(student and student.is_solo)
+    # Соло-спортсмен и тренер в режиме спортсмена: трюки не на проверку,
+    # а сразу в зачет (needs_review=False)
+    solo_mode = bool(student and (student.is_solo or student.is_athlete_mode))
 
     # Расчет очков и EXP (общий для тренера и ученика)
     calc_points, calc_xp = await calculate_single_trick(
@@ -547,11 +550,13 @@ def _coach_after_save_kb(workout_id: int, student_id: int):
     return builder.as_markup()
 
 
-def _student_training_menu(is_solo: bool = False):
-    """Reply-меню ученика после сохранения трюка."""
+def _student_training_menu(is_solo: bool = False, is_coach_athlete: bool = False):
+    """Reply-меню ученика после сохранения трюка.
+    is_coach_athlete — тренер в режиме спортсмена: его тренировка личная,
+    кнопку «🏁 Завершить тренировку» он тоже должен видеть."""
     from keyboards.skater_kb import get_student_training_menu
 
-    return get_student_training_menu(is_solo=is_solo)
+    return get_student_training_menu(is_solo=bool(is_solo or is_coach_athlete))
 
 
 # =====================================================================

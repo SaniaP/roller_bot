@@ -47,13 +47,23 @@ class ReviewAction(CallbackData, prefix="rev"):
     log_id: Optional[int] = None
 
 
-def get_coach_main_menu_sync(has_active_workout: bool) -> ReplyKeyboardMarkup:
-    """Главное меню тренера. Кнопка тренировки зависит от наличия активной тренировки в БД"""
+def get_coach_main_menu_sync(
+    has_active_workout: bool, athlete_mode: bool = False
+) -> ReplyKeyboardMarkup:
+    """Главное меню тренера. Кнопка тренировки зависит от наличия активной
+    тренировки в БД. При athlete_mode=True (тренер выступает как спортсмен
+    за комьюнити) рядом с тренировкой появляется кнопка «🏂 Меню спортсмена»."""
     builder = ReplyKeyboardBuilder()
     workout_btn_text = (
         "🏋️ Продолжить тренировку" if has_active_workout else "🏋️ Начать тренировку"
     )
-    builder.row(KeyboardButton(text=workout_btn_text))
+    if athlete_mode:
+        builder.row(
+            KeyboardButton(text=workout_btn_text),
+            KeyboardButton(text="🏂 Меню спортсмена"),
+        )
+    else:
+        builder.row(KeyboardButton(text=workout_btn_text))
     builder.row(
         KeyboardButton(text="👤 Добавить ученика"),
         KeyboardButton(text="📚 Справочник трюков"),

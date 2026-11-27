@@ -42,9 +42,14 @@ async def get_active_workout(
 
 
 async def get_coach_menu_for(session: AsyncSession, coach_id: int):
-    """Возвращает главное меню тренера с учётом наличия ЕГО активной тренировки"""
+    """Возвращает главное меню тренера с учётом наличия ЕГО активной тренировки
+    и режима спортсмена (athlete_community_id заполнен)"""
     active_w = await get_active_workout(session, coach_id=coach_id)
-    return get_coach_main_menu_sync(has_active_workout=active_w is not None)
+    coach = await session.get(User, coach_id)
+    return get_coach_main_menu_sync(
+        has_active_workout=active_w is not None,
+        athlete_mode=bool(coach and coach.athlete_community_id is not None),
+    )
 
 
 async def get_coach_menu_for_tg(session: AsyncSession, telegram_id: int):

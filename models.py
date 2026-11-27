@@ -76,6 +76,13 @@ class User(Base):
         String(100), nullable=True
     )  # Пойдет в личный кабинет пользователя при достижении 10 уровня, юзер сам его установит или тренер
 
+    # === РЕЖИМ СПОРТСМЕНА У ТРЕНЕРА ===
+    # Тренер выступает как спортсмен за это комьюнити.
+    # NULL = режим спортсмена выключен. Заполняется только для role='coach'.
+    athlete_community_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("communities.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Спортсмен, за которым следит зритель
     viewer_for: Mapped[Optional["User"]] = relationship(
         "User", foreign_keys=[viewer_for_id], remote_side=[id]
@@ -96,6 +103,11 @@ class User(Base):
     def is_coach(self) -> bool:
         """Удобная проверка роли без хранения дублирующего флага в базе"""
         return self.role == "coach"
+
+    @property
+    def is_athlete_mode(self) -> bool:
+        """Тренер выступает в роли спортсмена за комьюнити (athlete_community_id заполнен)"""
+        return self.role == "coach" and self.athlete_community_id is not None
 
 
 class Community(Base):
@@ -184,6 +196,11 @@ class Workout(Base):
     )
     # Флаг личной тренировки самостоятельного спортсмена
     is_solo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Исторический факт: за какое комьюнити выступал тренер в момент этой тренировки.
+    # Заполняется только для соло-тренировок тренеров-спортсменов.
+    community_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("communities.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     date: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

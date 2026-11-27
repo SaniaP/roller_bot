@@ -110,8 +110,9 @@ async def _restore_menu_after_combo(
         else message_or_callback
     )
 
-    # === ЛОГИКА УЧЕНИКА ===
-    if saver and saver.id == student_id and saver.role == "student":
+    # === ЛОГИКА УЧЕНИКА (и тренера в режиме спортсмена, который сохраняет СВОЮ
+    # личную тренировку) ===
+    if saver and saver.id == student_id and (saver.role == "student" or saver.is_athlete_mode):
         items = data.get("combo_items") or []
         combo_points = 0.0
         combo_xp = 0
@@ -131,7 +132,8 @@ async def _restore_menu_after_combo(
 
         if cancelled:
             msg_text = "↩️ Действие отменено."
-        elif saver.is_solo:
+        elif saver.is_solo or saver.is_athlete_mode:
+            # Соло-спортсмен и тренер в athlete-mode: связка засчитывается сразу
             # Соло-спортсмен: связка засчитывается сразу, без подтверждения тренера
             msg_text = (
                 "🧩 Связка засчитана!\n\n"
@@ -158,7 +160,9 @@ async def _restore_menu_after_combo(
         # Отправляем ученику одно чистое сообщение
         await target.answer(
             msg_text,
-            reply_markup=get_student_training_menu(is_solo=bool(saver.is_solo)),
+            reply_markup=get_student_training_menu(
+                is_solo=bool(saver.is_solo or saver.is_athlete_mode)
+            ),
         )
 
     # === ЛОГИКА ТРЕНЕРА ===
@@ -818,6 +822,10 @@ async def combo_save(
         )
     ).scalar_one_or_none()
     needs_review = bool(saver and saver.id == student.id and saver.role == "student")
+    # Тренер в режиме спортсмена (athlete mode) отправляет связку сам:
+    # она сразу в зачет, без подтверждения
+    if saver and saver.is_athlete_mode:
+        needs_review = False
 
     saved = 0
     for step, it in enumerate(items, start=1):
@@ -879,7 +887,8 @@ def _combo_cones_prompt(cone_line: str, by_student: bool = False) -> str:
 async def _inputter_is_student(
     session: AsyncSession, telegram_user_id: int, student_id: int | None
 ) -> bool:
-    """Определяет, кто вводит конусы: сам ученик (True) или тренер (False).
+    """Определяет, кто вводит конусы: сам ученик или тренер в athlete-mode
+    (со своей личной тренировки) — True; тренер от имени другого спортсмена — False.
 
     Аналогично combo_save: смотрим, кто реально пишет/нажимает, по telegram_id.
     """
@@ -888,7 +897,11 @@ async def _inputter_is_student(
     user = (
         await session.execute(select(User).where(User.telegram_id == telegram_user_id))
     ).scalar_one_or_none()
-    return bool(user and user.id == student_id and user.role == "student")
+    return bool(
+        user
+        and user.id == student_id
+        and (user.role == "student" or user.is_athlete_mode)
+    )
 
 
 def _combo_cancel_kb() -> InlineKeyboardMarkup:
